@@ -34,7 +34,14 @@
 
   <ItemDefinitionGroup>
     <ClCompile>
-      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <!-- Static CRT (/MT, not /MD): this DLL gets copied as a prebuilt binary onto target
+           machines that never ran this build (see build.bat / README's deployment flow) — a
+           dynamically-linked CRT would depend on the VC++ Redistributable being pre-installed
+           there, which isn't a safe assumption for an arbitrary customer/legacy-app machine.
+           Statically linking removes that whole failure class (observed in practice: LoadLibraryW
+           returning NULL in the target process with no other error, consistent with the loader
+           failing to resolve vcruntime140.dll/msvcp140.dll on a machine without the redist). -->
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <WarningLevel>Level3</WarningLevel>
       <Optimization>MaxSpeed</Optimization>
       <LanguageStandard>stdcpp17</LanguageStandard>

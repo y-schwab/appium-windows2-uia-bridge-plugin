@@ -32,7 +32,10 @@
 
   <ItemDefinitionGroup>
     <ClCompile>
-      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <!-- Static CRT — same rationale as UiaBridge.vcxproj: this exe ships as a prebuilt binary
+           to machines that never ran this build, so it can't depend on the VC++ Redistributable
+           being pre-installed there. -->
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <WarningLevel>Level3</WarningLevel>
       <Optimization>MaxSpeed</Optimization>
       <LanguageStandard>stdcpp17</LanguageStandard>
