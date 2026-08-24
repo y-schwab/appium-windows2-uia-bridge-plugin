@@ -1,13 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  x64|Release only — this plugin targets 64-bit host processes in v1 (see build.bat's header
-  comment for the 32-bit tradeoff, deferred as a documented v2 extension).
+  x64|Release and Win32|Release — a 64-bit injector cannot validly CreateRemoteThread into a
+  32-bit (WOW64) target process (the resolved LoadLibraryW address is meaningless in the target's
+  address space), so the DLL's bitness must match the target process's bitness. Both are built;
+  the plugin picks the matching pair at runtime based on the target's actual bitness (see
+  src/attach.ts).
 -->
 <Project DefaultTargets="Build" ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Release|x64">
       <Configuration>Release</Configuration>
       <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
     </ProjectConfiguration>
   </ItemGroup>
 
@@ -29,7 +36,8 @@
 
   <PropertyGroup>
     <TargetName>appium-uia-bridge</TargetName>
-    <OutDir>$(SolutionDir)..\native\win-x64\</OutDir>
+    <OutDir Condition="'$(Platform)'=='x64'">$(SolutionDir)..\native\win-x64\</OutDir>
+    <OutDir Condition="'$(Platform)'=='Win32'">$(SolutionDir)..\native\win-x86\</OutDir>
   </PropertyGroup>
 
   <ItemDefinitionGroup>

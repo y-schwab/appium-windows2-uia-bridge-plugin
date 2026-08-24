@@ -1,12 +1,12 @@
 @echo off
-REM Builds appium-uia-bridge.dll and appium-uia-bridge-injector.exe (pure C++, no /clr), dropping
-REM both into native/win-x64/ — same OutDir convention as appium-desktop-driver's own native
-REM build scripts (see dotnet-bridge-agent/build.bat there).
-REM
-REM x64 only in v1: the injector's bitness must match its target process's bitness (a 64-bit
-REM process can't be injected into by a 32-bit CreateRemoteThread caller, and vice versa), so
-REM 32-bit target support would need a second Win32|Release build of both projects, mirroring
-REM appium-desktop-driver's win-x64/win-x86 split — deferred, not required for the v1 scope.
+REM Builds appium-uia-bridge.dll and appium-uia-bridge-injector.exe (pure C++, no /clr) for both
+REM x64 and Win32 (x86), dropping them into native/win-x64/ and native/win-x86/ respectively —
+REM same OutDir convention as appium-desktop-driver's own native build scripts (see
+REM dotnet-bridge-agent/build.bat there). Both bitnesses are required: the injector's bitness
+REM must match its target process's bitness (a 64-bit CreateRemoteThread caller can't validly
+REM inject into a 32-bit/WOW64 target, and vice versa — confirmed in practice against a real
+REM 32-bit legacy target), and this driver is meant to attach to whatever bitness the legacy app
+REM actually is. The plugin picks the matching pair at runtime (see src/attach.ts).
 REM
 REM Requires: Visual Studio with the "Desktop development with C++" workload. Run from a
 REM "Developer Command Prompt for VS" (or after calling vcvars64.bat) so msbuild is on PATH.
@@ -40,8 +40,16 @@ if not defined MSBUILD (
 if errorlevel 1 exit /b 1
 echo Built native\win-x64\appium-uia-bridge.dll
 
+"%MSBUILD%" "%~dp0UiaBridge.vcxproj" /p:Configuration=Release /p:Platform=Win32
+if errorlevel 1 exit /b 1
+echo Built native\win-x86\appium-uia-bridge.dll
+
 "%MSBUILD%" "%~dp0Injector.vcxproj" /p:Configuration=Release /p:Platform=x64
 if errorlevel 1 exit /b 1
 echo Built native\win-x64\appium-uia-bridge-injector.exe
+
+"%MSBUILD%" "%~dp0Injector.vcxproj" /p:Configuration=Release /p:Platform=Win32
+if errorlevel 1 exit /b 1
+echo Built native\win-x86\appium-uia-bridge-injector.exe
 
 endlocal

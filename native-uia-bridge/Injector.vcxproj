@@ -1,11 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- x64|Release only — must match appium-uia-bridge.dll's bitness (a 64-bit injector can only
-     inject into a 64-bit target process). See UiaBridge.vcxproj's header comment. -->
+<!-- x64|Release and Win32|Release — must match appium-uia-bridge.dll's bitness per target (a
+     64-bit injector can only inject into a 64-bit target process, and vice versa). See
+     UiaBridge.vcxproj's header comment. -->
 <Project DefaultTargets="Build" ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Release|x64">
       <Configuration>Release</Configuration>
       <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
     </ProjectConfiguration>
   </ItemGroup>
 
@@ -27,7 +32,8 @@
 
   <PropertyGroup>
     <TargetName>appium-uia-bridge-injector</TargetName>
-    <OutDir>$(SolutionDir)..\native\win-x64\</OutDir>
+    <OutDir Condition="'$(Platform)'=='x64'">$(SolutionDir)..\native\win-x64\</OutDir>
+    <OutDir Condition="'$(Platform)'=='Win32'">$(SolutionDir)..\native\win-x86\</OutDir>
   </PropertyGroup>
 
   <ItemDefinitionGroup>
