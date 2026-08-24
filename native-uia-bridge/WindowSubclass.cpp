@@ -82,6 +82,7 @@ bool InstallSubclass(HWND hwnd) {
     rootRef.acc = containerAcc;
     rootRef.childId.vt = VT_I4;
     rootRef.childId.lVal = CHILDID_SELF;
+    rootRef.hwnd = hwnd; // Lets GetChildren() also walk the container's real child windows, not just its own MSAA-reported children.
 
     auto* root = new ProviderRoot(hwnd, rootRef);
 

@@ -9,13 +9,13 @@ ProviderElement::ProviderElement(
     ProviderRoot* root,
     ElementRegistry* registry,
     const AccessibleRef& self,
-    const ComPtr<IAccessible>& parentAcc,
+    const AccessibleRef& parentRef,
     IRawElementProviderFragment* parentFragment)
     : hwnd_(hwnd)
     , root_(root)
     , registry_(registry)
     , self_(self)
-    , parentAcc_(parentAcc)
+    , parentRef_(parentRef)
     , parentFragment_(parentFragment) {
     if (parentFragment_) {
         parentFragment_->AddRef();
@@ -138,24 +138,24 @@ HRESULT STDMETHODCALLTYPE ProviderElement::Navigate(NavigateDirection direction,
 
         case NavigateDirection_FirstChild:
         case NavigateDirection_LastChild: {
-            auto children = GetChildren(self_.acc.Get(), self_.childId);
+            auto children = GetChildren(self_);
             if (children.empty()) { return S_OK; }
             const AccessibleRef& child = (direction == NavigateDirection_FirstChild) ? children.front() : children.back();
-            *pRetVal = new ProviderElement(hwnd_, root_, registry_, child, self_.acc, this);
+            *pRetVal = new ProviderElement(hwnd_, root_, registry_, child, self_, this);
             return S_OK;
         }
 
         case NavigateDirection_NextSibling:
         case NavigateDirection_PreviousSibling: {
-            if (!parentAcc_) { return S_OK; } // root-level element under the container has no MSAA "parent" to re-enumerate
-            auto siblings = GetChildren(parentAcc_.Get(), [] { VARIANT v; VariantInit(&v); v.vt = VT_I4; v.lVal = CHILDID_SELF; return v; }());
+            if (!parentRef_.acc) { return S_OK; } // root-level element under the container has no MSAA "parent" to re-enumerate
+            auto siblings = GetChildren(parentRef_);
             for (size_t i = 0; i < siblings.size(); ++i) {
                 bool sameChild = siblings[i].acc.Get() == self_.acc.Get() && siblings[i].childId.lVal == self_.childId.lVal;
                 if (!sameChild) { continue; }
                 size_t neighborIndex = (direction == NavigateDirection_NextSibling) ? i + 1 : i - 1;
                 if (direction == NavigateDirection_PreviousSibling && i == 0) { return S_OK; }
                 if (neighborIndex >= siblings.size()) { return S_OK; }
-                *pRetVal = new ProviderElement(hwnd_, root_, registry_, siblings[neighborIndex], parentAcc_, parentFragment_);
+                *pRetVal = new ProviderElement(hwnd_, root_, registry_, siblings[neighborIndex], parentRef_, parentFragment_);
                 return S_OK;
             }
             return S_OK;

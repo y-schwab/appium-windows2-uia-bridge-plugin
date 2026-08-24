@@ -71,44 +71,89 @@ HRESULT GetContainerAccessible(HWND hwnd, ComPtr<IAccessible>& outAcc) {
     return S_OK;
 }
 
-std::vector<AccessibleRef> GetChildren(IAccessible* parent, const VARIANT& parentChildId) {
+namespace {
+
+// Direct (non-recursive) child windows only — EnumChildWindows itself walks the *entire*
+// descendant subtree, which would flatten multiple tree levels into one and double-count anything
+// reached again once we recurse into each direct child's own GetChildren() call. GetWindow's
+// GW_CHILD/GW_HWNDNEXT chain gives just the immediate children, matching how the MSAA side of
+// this function only reports one level too.
+std::vector<HWND> GetDirectChildWindows(HWND hwnd) {
+    std::vector<HWND> result;
+    for (HWND child = GetWindow(hwnd, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT)) {
+        if (IsWindowVisible(child)) {
+            result.push_back(child);
+        }
+    }
+    return result;
+}
+
+} // namespace
+
+std::vector<AccessibleRef> GetChildren(const AccessibleRef& node) {
     std::vector<AccessibleRef> result;
-    if (!parent || parentChildId.vt != VT_I4 || parentChildId.lVal != CHILDID_SELF) {
-        // MSAA "simple children" (plain integer childIds) have no children of their own.
-        return result;
-    }
+    std::vector<HWND> coveredHwnds; // hwnds already added via the MSAA path, skipped in the window-enum pass below
 
-    long childCount = 0;
-    if (FAILED(parent->get_accChildCount(&childCount)) || childCount <= 0) {
-        return result;
-    }
-
-    std::vector<VARIANT> children(childCount);
-    long fetched = 0;
-    HRESULT hr = AccessibleChildren(parent, 0, childCount, children.data(), &fetched);
-    if (FAILED(hr)) {
-        return result;
-    }
-
-    for (long i = 0; i < fetched; ++i) {
-        AccessibleRef ref;
-        if (children[i].vt == VT_DISPATCH && children[i].pdispVal) {
-            IAccessible* childAcc = nullptr;
-            if (SUCCEEDED(children[i].pdispVal->QueryInterface(IID_IAccessible, reinterpret_cast<void**>(&childAcc)))) {
-                ref.acc.Attach(childAcc);
-                ref.childId.vt = VT_I4;
-                ref.childId.lVal = CHILDID_SELF;
-                result.push_back(ref);
+    if (node.acc && node.childId.vt == VT_I4 && node.childId.lVal == CHILDID_SELF) {
+        long childCount = 0;
+        if (SUCCEEDED(node.acc->get_accChildCount(&childCount)) && childCount > 0) {
+            std::vector<VARIANT> children(childCount);
+            long fetched = 0;
+            if (SUCCEEDED(AccessibleChildren(node.acc.Get(), 0, childCount, children.data(), &fetched))) {
+                for (long i = 0; i < fetched; ++i) {
+                    AccessibleRef ref;
+                    if (children[i].vt == VT_DISPATCH && children[i].pdispVal) {
+                        IAccessible* childAcc = nullptr;
+                        if (SUCCEEDED(children[i].pdispVal->QueryInterface(IID_IAccessible, reinterpret_cast<void**>(&childAcc)))) {
+                            ref.acc.Attach(childAcc);
+                            ref.childId.vt = VT_I4;
+                            ref.childId.lVal = CHILDID_SELF;
+                            // Some full child objects are themselves backed by a real window
+                            // (e.g. a toolbar control reported as a proper MSAA child object
+                            // that also happens to be its own hwnd) — resolving this lets the
+                            // window-based walk recurse correctly from this node too, not just
+                            // from directly-enumerated child windows.
+                            HWND childHwnd = nullptr;
+                            if (SUCCEEDED(WindowFromAccessibleObject(ref.acc.Get(), &childHwnd)) && childHwnd) {
+                                ref.hwnd = childHwnd;
+                                coveredHwnds.push_back(childHwnd);
+                            }
+                            result.push_back(ref);
+                        }
+                        VariantClear(&children[i]);
+                    } else if (children[i].vt == VT_I4) {
+                        // Simple children have no window of their own — nothing to dedupe or recurse into via hwnd.
+                        ref.acc = node.acc;
+                        ref.childId.vt = VT_I4;
+                        ref.childId.lVal = children[i].lVal;
+                        result.push_back(ref);
+                    }
+                }
             }
-            VariantClear(&children[i]);
-        } else if (children[i].vt == VT_I4) {
-            ref.acc = ComPtr<IAccessible>(parent);
-            parent->AddRef();
+        }
+    }
+
+    // Real child windows this node's own IAccessible never reported — see AccessibleRef's
+    // comment on why this second source is necessary. Only applies to nodes we know are backed
+    // by a real hwnd (the container itself, or a full child object resolved to one above).
+    if (node.hwnd) {
+        for (HWND childHwnd : GetDirectChildWindows(node.hwnd)) {
+            if (std::find(coveredHwnds.begin(), coveredHwnds.end(), childHwnd) != coveredHwnds.end()) {
+                continue;
+            }
+            IAccessible* childAcc = nullptr;
+            if (FAILED(AccessibleObjectFromWindow(childHwnd, OBJID_CLIENT, IID_IAccessible, reinterpret_cast<void**>(&childAcc))) || !childAcc) {
+                continue;
+            }
+            AccessibleRef ref;
+            ref.acc.Attach(childAcc);
             ref.childId.vt = VT_I4;
-            ref.childId.lVal = children[i].lVal;
+            ref.childId.lVal = CHILDID_SELF;
+            ref.hwnd = childHwnd;
             result.push_back(ref);
         }
     }
+
     return result;
 }
 
@@ -190,8 +235,7 @@ bool MatchesLocator(const AccessibleNodeInfo& info, LocateStrategy strategy, con
 }
 
 std::vector<AccessibleRef> FindMatching(
-    IAccessible* root,
-    const VARIANT& rootChildId,
+    const AccessibleRef& root,
     LocateStrategy strategy,
     const std::wstring& value,
     bool multiple) {
@@ -199,32 +243,19 @@ std::vector<AccessibleRef> FindMatching(
 
     // BFS to keep result ordering stable/predictable across calls and to bound recursion depth
     // for pathological trees.
-    struct QueueItem { ComPtr<IAccessible> acc; VARIANT childId; };
-    std::vector<QueueItem> queue;
-    {
-        QueueItem item;
-        item.acc = ComPtr<IAccessible>(root);
-        root->AddRef();
-        item.childId = rootChildId;
-        queue.push_back(item);
-    }
+    std::vector<AccessibleRef> queue;
+    queue.push_back(root);
 
     for (size_t i = 0; i < queue.size(); ++i) {
         AccessibleNodeInfo info = GetNodeInfo(queue[i].acc.Get(), queue[i].childId);
         if (MatchesLocator(info, strategy, value)) {
-            AccessibleRef ref;
-            ref.acc = queue[i].acc;
-            ref.childId = queue[i].childId;
-            result.push_back(ref);
+            result.push_back(queue[i]);
             if (!multiple) {
                 return result;
             }
         }
-        for (auto& child : GetChildren(queue[i].acc.Get(), queue[i].childId)) {
-            QueueItem item;
-            item.acc = child.acc;
-            item.childId = child.childId;
-            queue.push_back(item);
+        for (auto& child : GetChildren(queue[i])) {
+            queue.push_back(child);
         }
     }
 

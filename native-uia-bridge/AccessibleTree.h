@@ -14,22 +14,33 @@
 
 namespace UiaBridge {
 
-// One node in the container's MSAA tree — either the container itself (childId = CHILDID_SELF,
-// acc = the container's own IAccessible) or a "simple child" (acc = parent's IAccessible,
-// childId = a plain integer with no IDispatch of its own) or a full child object (acc = the
-// child's own IAccessible, childId = CHILDID_SELF) — MSAA allows either shape per child.
+// One node in the container's accessible tree — either the container itself (childId =
+// CHILDID_SELF, acc = the container's own IAccessible), a "simple child" (acc = parent's
+// IAccessible, childId = a plain integer with no IDispatch of its own), or a full child object
+// (acc = the child's own IAccessible, childId = CHILDID_SELF) — MSAA allows either shape per
+// child. `hwnd` is set whenever this node is backed by a real Win32 window (resolved via
+// WindowFromAccessibleObject for MSAA-reported full objects, or known directly for nodes
+// discovered by walking child windows) — GetChildren() uses it to also enumerate that window's
+// *real* child windows, not just whatever the parent's own IAccessible chooses to report as
+// children. A window's own MSAA child enumeration frequently only covers its directly-painted
+// content, not other genuine child HWNDs nested inside it (e.g. a toolbar or button that is its
+// own separate window) — those need this second, HWND-based discovery path or they're invisible
+// to the tree entirely, even though they usually carry far richer name/role/text than the
+// container's own thin surface.
 struct AccessibleRef {
     ComPtr<IAccessible> acc;
     VARIANT childId{};
+    HWND hwnd = nullptr;
 
     AccessibleRef() { VariantInit(&childId); }
-    AccessibleRef(const AccessibleRef& other) : acc(other.acc) {
+    AccessibleRef(const AccessibleRef& other) : acc(other.acc), hwnd(other.hwnd) {
         VariantInit(&childId);
         VariantCopy(&childId, const_cast<VARIANT*>(&other.childId));
     }
     AccessibleRef& operator=(const AccessibleRef& other) {
         if (this != &other) {
             acc = other.acc;
+            hwnd = other.hwnd;
             VariantClear(&childId);
             VariantCopy(&childId, const_cast<VARIANT*>(&other.childId));
         }
@@ -58,9 +69,11 @@ struct AccessibleNodeInfo {
 // apply here, since this call always happens first.
 HRESULT GetContainerAccessible(HWND hwnd, ComPtr<IAccessible>& outAcc);
 
-// Enumerates the direct children of `parent`/`parentChildId` (pass CHILDID_SELF for the
-// container's own top-level children).
-std::vector<AccessibleRef> GetChildren(IAccessible* parent, const VARIANT& parentChildId);
+// Enumerates the direct children of `node` — both the MSAA-reported logical children
+// (AccessibleChildren) and, when `node.hwnd` is set, that window's real direct child windows
+// (each queried independently via AccessibleObjectFromWindow) — deduplicated against each other
+// by hwnd. See AccessibleRef's comment for why both sources are needed.
+std::vector<AccessibleRef> GetChildren(const AccessibleRef& node);
 
 AccessibleNodeInfo GetNodeInfo(IAccessible* acc, const VARIANT& childId);
 
@@ -79,11 +92,9 @@ enum class LocateStrategy { Name, AccessibilityId, ClassName, ControlType };
 // property where the underlying control supports late binding, but that's per-control-type work.
 bool MatchesLocator(const AccessibleNodeInfo& info, LocateStrategy strategy, const std::wstring& value);
 
-// Depth-first search starting at `root`/`rootChildId`. If `multiple` is false, stops at the
-// first match.
+// Breadth-first search starting at `root`. If `multiple` is false, stops at the first match.
 std::vector<AccessibleRef> FindMatching(
-    IAccessible* root,
-    const VARIANT& rootChildId,
+    const AccessibleRef& root,
     LocateStrategy strategy,
     const std::wstring& value,
     bool multiple);

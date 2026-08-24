@@ -99,10 +99,10 @@ HRESULT STDMETHODCALLTYPE ProviderRoot::Navigate(NavigateDirection direction, IR
 
         case NavigateDirection_FirstChild:
         case NavigateDirection_LastChild: {
-            auto children = GetChildren(rootRef_.acc.Get(), rootRef_.childId);
+            auto children = GetChildren(rootRef_);
             if (children.empty()) { return S_OK; }
             const AccessibleRef& child = (direction == NavigateDirection_FirstChild) ? children.front() : children.back();
-            *pRetVal = new ProviderElement(hwnd_, this, &registry_, child, rootRef_.acc, this);
+            *pRetVal = new ProviderElement(hwnd_, this, &registry_, child, rootRef_, this);
             return S_OK;
         }
     }
@@ -154,10 +154,10 @@ bool HitTestRecursive(HWND hwnd, ProviderRoot* root, ElementRegistry* registry,
                        const AccessibleRef& node,
                        IRawElementProviderFragment* parentFragment,
                        double x, double y, ProviderElement** outMatch) {
-    for (auto& child : GetChildren(node.acc.Get(), node.childId)) {
+    for (auto& child : GetChildren(node)) {
         AccessibleNodeInfo info = GetNodeInfo(child.acc.Get(), child.childId);
         if (!RectContains(info.rectScreen, x, y)) { continue; }
-        auto* childElement = new ProviderElement(hwnd, root, registry, child, node.acc, parentFragment);
+        auto* childElement = new ProviderElement(hwnd, root, registry, child, node, parentFragment);
         ProviderElement* deeper = nullptr;
         if (HitTestRecursive(hwnd, root, registry, child, childElement, x, y, &deeper)) {
             childElement->Release();

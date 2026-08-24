@@ -23,14 +23,16 @@ class ProviderElement
 public:
     // `parentFragment` is AddRef'd by the caller and owned by this instance (released in the
     // destructor) — used to answer NavigateDirection_Parent and to re-derive siblings via
-    // `parentAcc`. `root` is a non-owning back-pointer: ProviderRoot outlives every
-    // ProviderElement created under it (all released together on detach, see WindowSubclass.cpp).
+    // `parentRef`. `parentRef` (not just its IAccessible) is needed, not only its ComPtr, because
+    // GetChildren() needs the parent's hwnd too to correctly re-walk sibling child windows.
+    // `root` is a non-owning back-pointer: ProviderRoot outlives every ProviderElement created
+    // under it (all released together on detach, see WindowSubclass.cpp).
     ProviderElement(
         HWND hwnd,
         ProviderRoot* root,
         ElementRegistry* registry,
         const AccessibleRef& self,
-        const ComPtr<IAccessible>& parentAcc,
+        const AccessibleRef& parentRef,
         IRawElementProviderFragment* parentFragment);
     virtual ~ProviderElement();
 
@@ -70,7 +72,7 @@ private:
     ProviderRoot* root_; // non-owning
     ElementRegistry* registry_; // non-owning
     AccessibleRef self_;
-    ComPtr<IAccessible> parentAcc_;
+    AccessibleRef parentRef_;
     IRawElementProviderFragment* parentFragment_; // owned, AddRef'd in ctor
     std::wstring internalId_;
 };
