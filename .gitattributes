@@ -1,0 +1,5 @@
+# cmd.exe's batch parser mis-tokenizes REM comment lines with LF-only endings (splits words out
+# of comments into bogus commands — see the fix commit for build.bat). Force CRLF on checkout
+# regardless of the cloning machine's core.autocrlf setting, so this doesn't silently break again
+# on a machine configured differently than this one.
+*.bat text eol=crlf
