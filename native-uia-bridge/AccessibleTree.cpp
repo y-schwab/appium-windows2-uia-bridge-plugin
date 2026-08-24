@@ -1,6 +1,7 @@
 #include "AccessibleTree.h"
 #include <algorithm>
 #include <cctype>
+#include <cwctype>
 
 #pragma comment(lib, "oleacc.lib")
 

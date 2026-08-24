@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
+// __dirname is a CommonJS global (this package builds to CJS, matching @appium/tsconfig's
+// default and how Appium plugins are conventionally loaded) — no import.meta/fileURLToPath
+// workaround needed.
 
 /**
  * Native artifacts are gitignored and built by native-uia-bridge/build.bat (see package.json's
