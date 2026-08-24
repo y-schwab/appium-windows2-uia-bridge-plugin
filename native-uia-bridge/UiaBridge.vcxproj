@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  x64|Release only — this plugin targets 64-bit host processes in v1 (see build.bat's header
+  comment for the 32-bit tradeoff, deferred as a documented v2 extension).
+-->
+<Project DefaultTargets="Build" ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{A1E9D8C2-4F3B-4B7E-9C1A-2D6E8F0A1B2C}</ProjectGuid>
+    <RootNamespace>UiaBridge</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <PropertyGroup>
+    <TargetName>appium-uia-bridge</TargetName>
+    <OutDir>$(SolutionDir)..\native\win-x64\</OutDir>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <WarningLevel>Level3</WarningLevel>
+      <Optimization>MaxSpeed</Optimization>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <PreprocessorDefinitions>WIN32;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <!-- No exports needed: appium-uia-bridge-injector.exe injects via plain
+           CreateRemoteThread+LoadLibraryW, which runs DllMain automatically — DllMain.cpp's
+           DLL_PROCESS_ATTACH handler does the rest (see AttachWorker). -->
+    </Link>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <ClCompile Include="AccessibleTree.cpp" />
+    <ClCompile Include="DllMain.cpp" />
+    <ClCompile Include="ElementRegistry.cpp" />
+    <ClCompile Include="ProviderElement.cpp" />
+    <ClCompile Include="ProviderRoot.cpp" />
+    <ClCompile Include="WindowSubclass.cpp" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ClInclude Include="AccessibleTree.h" />
+    <ClInclude Include="ComPtr.h" />
+    <ClInclude Include="ElementRegistry.h" />
+    <ClInclude Include="ProviderElement.h" />
+    <ClInclude Include="ProviderRoot.h" />
+    <ClInclude Include="UiaMapping.h" />
+    <ClInclude Include="WindowSubclass.h" />
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>
