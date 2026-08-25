@@ -1,4 +1,5 @@
 #include "AccessibleTree.h"
+#include "Diagnostics.h"
 #include <algorithm>
 #include <cctype>
 #include <cwctype>
@@ -49,6 +50,53 @@ std::wstring RoleToControlType(const VARIANT& roleVariant) {
     }
 }
 
+// Fallback #1 for GetNodeInfo: bypasses MSAA entirely. Some custom controls (e.g. legacy Win32
+// classes with no real IAccessible implementation) still answer plain window text even though
+// their accName is empty.
+std::wstring TryGetWindowText(HWND hwnd) {
+    int len = GetWindowTextLengthW(hwnd);
+    if (len <= 0) {
+        return L"";
+    }
+    std::wstring buf(static_cast<size_t>(len), L'\0');
+    int copied = GetWindowTextW(hwnd, buf.data(), len + 1);
+    buf.resize(copied > 0 ? static_cast<size_t>(copied) : 0);
+    return buf;
+}
+
+// Fallback #2 for GetNodeInfo: a second, independent WM_GETOBJECT probe against OBJID_WINDOW
+// (the window-frame object) rather than OBJID_CLIENT (the content object GetContainerAccessible
+// and GetChildren use). Some apps only ever populate the frame object's accName, leaving the
+// content object's blank. Safe to SendMessageW here even against our own subclassed root hwnd —
+// SubclassProc (WindowSubclass.cpp) only intercepts OBJID_CLIENT/UiaRootObjectId and forwards
+// everything else, including OBJID_WINDOW, straight to the original wndproc — so this can't
+// recurse into our own provider.
+std::wstring TryGetWindowObjectName(HWND hwnd) {
+    LRESULT lresult = SendMessageW(hwnd, WM_GETOBJECT, 0, OBJID_WINDOW);
+    if (lresult == 0) {
+        return L"";
+    }
+    IAccessible* raw = nullptr;
+    if (FAILED(ObjectFromLresult(lresult, IID_IAccessible, 0, reinterpret_cast<void**>(&raw))) || !raw) {
+        return L"";
+    }
+    ComPtr<IAccessible> acc;
+    acc.Attach(raw);
+
+    VARIANT self;
+    VariantInit(&self);
+    self.vt = VT_I4;
+    self.lVal = CHILDID_SELF;
+
+    std::wstring result;
+    BSTR name = nullptr;
+    if (SUCCEEDED(acc->get_accName(self, &name)) && name) {
+        result.assign(name, SysStringLen(name));
+        SysFreeString(name);
+    }
+    return result;
+}
+
 } // namespace
 
 HRESULT GetContainerAccessible(HWND hwnd, ComPtr<IAccessible>& outAcc) {
@@ -59,14 +107,38 @@ HRESULT GetContainerAccessible(HWND hwnd, ComPtr<IAccessible>& outAcc) {
     // before our subclass is installed, reaches the container's real original WM_GETOBJECT
     // handler — see the header comment for why this must not be CallWindowProc.
     LRESULT lresult = SendMessageW(hwnd, WM_GETOBJECT, 0, OBJID_CLIENT);
-    if (lresult == 0) {
-        return E_FAIL;
+    DiagLog(L"GetContainerAccessible(0x%p): SendMessageW(WM_GETOBJECT, OBJID_CLIENT) -> lresult=%lld", hwnd, static_cast<long long>(lresult));
+    if (lresult != 0) {
+        IAccessible* raw = nullptr;
+        HRESULT unmarshalHr = ObjectFromLresult(lresult, IID_IAccessible, 0, reinterpret_cast<void**>(&raw));
+        if (SUCCEEDED(unmarshalHr)) {
+            DiagLog(L"GetContainerAccessible(0x%p): primary path (target answered WM_GETOBJECT itself) succeeded", hwnd);
+            outAcc.Attach(raw);
+            return S_OK;
+        }
+        DiagLog(L"GetContainerAccessible(0x%p): ObjectFromLresult failed (hr=0x%08lX), trying fallback", hwnd, static_cast<unsigned long>(unmarshalHr));
+    } else {
+        DiagLog(L"GetContainerAccessible(0x%p): target did not answer WM_GETOBJECT itself (lresult=0) — no app-provided IAccessible, trying fallback", hwnd);
     }
+
+    // Fallback: plenty of legacy Win32 controls (confirmed via Inspect in MSAA mode against this
+    // exact target — "Impl: Local oleacc proxy", every provider in the chain a generic Microsoft
+    // one, nothing app-specific) never answer WM_GETOBJECT themselves at all. In that case there
+    // is no real per-window IAccessible to retrieve — AccessibleObjectFromWindow's own documented
+    // fallback (silently synthesizing that same generic proxy object from the hwnd's raw Win32
+    // properties, no cooperation from the target required) is the only way to get anything.
+    // GetChildren() already relies on this exact API for child hwnds — safe to use here too now
+    // that we're running in-process (injected DLL), which sidesteps the out-of-process
+    // RPC/marshaling problem that made this function avoid it originally (see this file's header
+    // comment) — that problem was specific to controls with *real* custom accessibility, not this
+    // proxy-only case.
     IAccessible* raw = nullptr;
-    HRESULT hr = ObjectFromLresult(lresult, IID_IAccessible, 0, reinterpret_cast<void**>(&raw));
-    if (FAILED(hr)) {
-        return hr;
+    HRESULT hr = AccessibleObjectFromWindow(hwnd, OBJID_CLIENT, IID_IAccessible, reinterpret_cast<void**>(&raw));
+    if (FAILED(hr) || !raw) {
+        DiagLog(L"GetContainerAccessible(0x%p): fallback AccessibleObjectFromWindow also failed (hr=0x%08lX) — target has no usable IAccessible via any path", hwnd, static_cast<unsigned long>(hr));
+        return FAILED(hr) ? hr : E_FAIL;
     }
+    DiagLog(L"GetContainerAccessible(0x%p): fallback path (AccessibleObjectFromWindow's generic proxy synthesis) succeeded", hwnd);
     outAcc.Attach(raw);
     return S_OK;
 }
@@ -157,18 +229,27 @@ std::vector<AccessibleRef> GetChildren(const AccessibleRef& node) {
     return result;
 }
 
-AccessibleNodeInfo GetNodeInfo(IAccessible* acc, const VARIANT& childId) {
+AccessibleNodeInfo GetNodeInfo(const AccessibleRef& ref) {
     AccessibleNodeInfo info;
+    IAccessible* acc = ref.acc.Get();
     if (!acc) {
         return info;
     }
 
-    VARIANT selfId = childId;
+    VARIANT selfId = ref.childId;
 
     BSTR name = nullptr;
     if (SUCCEEDED(acc->get_accName(selfId, &name)) && name) {
         info.name.assign(name, SysStringLen(name));
         SysFreeString(name);
+    }
+
+    // Only ever fills a name MSAA left blank — never overwrites what accName already gave us.
+    if (info.name.empty() && ref.hwnd) {
+        info.name = TryGetWindowText(ref.hwnd);
+    }
+    if (info.name.empty() && ref.hwnd) {
+        info.name = TryGetWindowObjectName(ref.hwnd);
     }
 
     VARIANT role;
@@ -247,7 +328,7 @@ std::vector<AccessibleRef> FindMatching(
     queue.push_back(root);
 
     for (size_t i = 0; i < queue.size(); ++i) {
-        AccessibleNodeInfo info = GetNodeInfo(queue[i].acc.Get(), queue[i].childId);
+        AccessibleNodeInfo info = GetNodeInfo(queue[i]);
         if (MatchesLocator(info, strategy, value)) {
             result.push_back(queue[i]);
             if (!multiple) {

@@ -66,6 +66,7 @@
 
   <ItemGroup>
     <ClCompile Include="AccessibleTree.cpp" />
+    <ClCompile Include="Diagnostics.cpp" />
     <ClCompile Include="DllMain.cpp" />
     <ClCompile Include="ElementRegistry.cpp" />
     <ClCompile Include="ProviderElement.cpp" />
@@ -76,6 +77,7 @@
   <ItemGroup>
     <ClInclude Include="AccessibleTree.h" />
     <ClInclude Include="ComPtr.h" />
+    <ClInclude Include="Diagnostics.h" />
     <ClInclude Include="ElementRegistry.h" />
     <ClInclude Include="ProviderElement.h" />
     <ClInclude Include="ProviderRoot.h" />

@@ -82,7 +82,7 @@ HRESULT STDMETHODCALLTYPE ProviderElement::GetPropertyValue(PROPERTYID propertyI
     if (!pRetVal) { return E_POINTER; }
     VariantInit(pRetVal);
 
-    AccessibleNodeInfo info = GetNodeInfo(self_.acc.Get(), self_.childId);
+    AccessibleNodeInfo info = GetNodeInfo(self_);
 
     switch (propertyId) {
         case UIA_NamePropertyId:
@@ -180,7 +180,7 @@ HRESULT STDMETHODCALLTYPE ProviderElement::GetRuntimeId(SAFEARRAY** pRetVal) {
 
 HRESULT STDMETHODCALLTYPE ProviderElement::get_BoundingRectangle(UiaRect* pRetVal) {
     if (!pRetVal) { return E_POINTER; }
-    AccessibleNodeInfo info = GetNodeInfo(self_.acc.Get(), self_.childId);
+    AccessibleNodeInfo info = GetNodeInfo(self_);
     pRetVal->left = info.rectScreen.left;
     pRetVal->top = info.rectScreen.top;
     pRetVal->width = info.rectScreen.right - info.rectScreen.left;
@@ -216,7 +216,7 @@ HRESULT STDMETHODCALLTYPE ProviderElement::SetValue(LPCWSTR val) {
 
 HRESULT STDMETHODCALLTYPE ProviderElement::get_Value(BSTR* pRetVal) {
     if (!pRetVal) { return E_POINTER; }
-    AccessibleNodeInfo info = GetNodeInfo(self_.acc.Get(), self_.childId);
+    AccessibleNodeInfo info = GetNodeInfo(self_);
     *pRetVal = SysAllocString(info.value.c_str());
     return S_OK;
 }

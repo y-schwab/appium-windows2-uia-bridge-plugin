@@ -6,14 +6,18 @@
 // — needed to fetch the container's real in-process IAccessible via
 // AccessibleTree::GetContainerAccessible without recursing into our own subclass.
 
+#include <string>
 #include <windows.h>
 
 namespace UiaBridge {
 
 // Subclasses `hwnd`, builds the ProviderRoot for it, and registers both so WM_GETOBJECT can be
 // answered. Returns false if the container's own IAccessible could not be obtained (nothing to
-// bridge) or the hwnd is already subclassed by this DLL.
-bool InstallSubclass(HWND hwnd);
+// bridge) or the hwnd is already subclassed by this DLL. When it returns false and `outError` is
+// non-null, fills it with which specific precondition failed — DllMain.cpp relays this back
+// through the injector so a failed `windows: attachUiaBridge` call tells the caller why, instead
+// of just that it failed.
+bool InstallSubclass(HWND hwnd, std::wstring* outError = nullptr);
 
 // Restores the original window procedure and releases the associated ProviderRoot. Called from
 // the subclass's own WM_NCDESTROY handler and from DllMain's DLL_PROCESS_DETACH as a safety net

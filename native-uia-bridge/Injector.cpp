@@ -21,12 +21,22 @@
 
 namespace {
 
-bool WriteHandshakeFile(DWORD pid, HWND hwnd) {
+std::wstring HandshakeFilePath(DWORD pid) {
     wchar_t tempDir[MAX_PATH];
     GetTempPathW(MAX_PATH, tempDir);
-    std::wstring path = std::wstring(tempDir) + L"appium-uia-bridge-inject-" + std::to_wstring(pid) + L".hwnd";
+    return std::wstring(tempDir) + L"appium-uia-bridge-inject-" + std::to_wstring(pid) + L".hwnd";
+}
 
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, nullptr);
+// Must match DllMain.cpp's own ResultFilePath exactly (same pid-keyed naming) — that's where
+// AttachWorker reports whether InstallSubclass actually succeeded, once it's had a chance to run.
+std::wstring ResultFilePath(DWORD pid) {
+    wchar_t tempDir[MAX_PATH];
+    GetTempPathW(MAX_PATH, tempDir);
+    return std::wstring(tempDir) + L"appium-uia-bridge-inject-" + std::to_wstring(pid) + L".result";
+}
+
+bool WriteHandshakeFile(DWORD pid, HWND hwnd) {
+    HANDLE file = CreateFileW(HandshakeFilePath(pid).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
         return false;
     }
@@ -35,6 +45,89 @@ bool WriteHandshakeFile(DWORD pid, HWND hwnd) {
     BOOL ok = WriteFile(file, contents.data(), static_cast<DWORD>(contents.size()), &written, nullptr);
     CloseHandle(file);
     return ok && written == contents.size();
+}
+
+// Blocks until AttachWorker (running inside the target process, see DllMain.cpp) reports whether
+// InstallSubclass actually succeeded — LoadLibraryW returning just means the DLL finished
+// *loading*, not that the subclass is installed; DllMain fires that work on its own background
+// thread (required — COM calls under the loader lock deadlock) and returns immediately, so
+// without this wait the injector could exit "successfully" before InstallSubclass ever ran.
+// Two-outcome result: true = confirmed success, false = confirmed failure OR timed out waiting
+// (`timedOut` distinguishes the two for the caller's error message). On failure, `outReason` gets
+// whatever human-readable explanation DllMain.cpp's WriteResultFile appended after the status
+// byte (see there — UTF-8, only present for InstallSubclass failures, not the timeout case).
+bool WaitForAttachResult(DWORD pid, bool* timedOut, std::string* outReason) {
+    *timedOut = false;
+    std::wstring path = ResultFilePath(pid);
+    for (int attempt = 0; attempt < 100; ++attempt) { // 100 x 50ms = 5s
+        HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (file != INVALID_HANDLE_VALUE) {
+            char buffer[512] = {};
+            DWORD bytesRead = 0;
+            BOOL ok = ReadFile(file, buffer, sizeof(buffer) - 1, &bytesRead, nullptr);
+            CloseHandle(file);
+            DeleteFileW(path.c_str());
+            if (ok && bytesRead >= 1) {
+                bool success = buffer[0] == '1';
+                if (!success && outReason) {
+                    outReason->assign(buffer + 1, bytesRead - 1);
+                }
+                return success;
+            }
+        }
+        Sleep(50);
+    }
+    *timedOut = true;
+    return false;
+}
+
+// Must match Diagnostics.cpp's own DiagLogPath exactly (same pid-keyed naming) — that's where
+// every DiagLog call from inside the target process (AttachWorker, InstallSubclass,
+// GetContainerAccessible, ...) appended its trace line.
+std::wstring DiagLogPath(DWORD pid) {
+    wchar_t tempDir[MAX_PATH];
+    GetTempPathW(MAX_PATH, tempDir);
+    return std::wstring(tempDir) + L"appium-uia-bridge-inject-" + std::to_wstring(pid) + L".diag.log";
+}
+
+// Relays the full attach-time trace to stderr, always — success or failure — so attach.ts's
+// caller sees it regardless of outcome (see attach.ts for why it logs stderr unconditionally now,
+// not just on rejection). Written as raw UTF-8 bytes straight to the stderr handle rather than
+// through fwprintf/wprintf: this log can contain non-ASCII window text/class names (e.g. this
+// target's own Hebrew dialog title), and fwprintf's %hs conversion goes through the current C
+// locale (typically the system ANSI codepage, not UTF-8) — Node's child_process stdio defaults to
+// decoding chunks as UTF-8, so writing raw UTF-8 bytes directly is what actually round-trips.
+void RelayDiagLog(DWORD pid) {
+    std::wstring path = DiagLogPath(pid);
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        fwprintf(stderr, L"(no attach diagnostics were captured for pid %lu)\n", pid);
+        return;
+    }
+    DWORD size = GetFileSize(file, nullptr);
+    std::string buffer;
+    if (size != INVALID_FILE_SIZE && size > 0) {
+        buffer.resize(size);
+        DWORD bytesRead = 0;
+        ReadFile(file, buffer.data(), size, &bytesRead, nullptr);
+        buffer.resize(bytesRead);
+    }
+    CloseHandle(file);
+    DeleteFileW(path.c_str());
+
+    HANDLE stderrHandle = GetStdHandle(STD_ERROR_HANDLE);
+    auto writeAscii = [&](const wchar_t* text) {
+        fwprintf(stderr, L"%s", text);
+        fflush(stderr);
+    };
+    writeAscii(L"----- appium-uia-bridge attach diagnostics -----\r\n");
+    if (!buffer.empty() && stderrHandle != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+        WriteFile(stderrHandle, buffer.data(), static_cast<DWORD>(buffer.size()), &written, nullptr);
+    } else {
+        writeAscii(L"(diagnostics file was empty)\r\n");
+    }
+    writeAscii(L"----- end diagnostics -----\r\n");
 }
 
 // Injects `dllPath` into `pid` via the classic CreateRemoteThread+LoadLibraryW technique.
@@ -116,6 +209,19 @@ int wmain(int argc, wchar_t* argv[]) {
     }
 
     if (!InjectDll(pid, argv[2])) {
+        return 1;
+    }
+
+    bool timedOut = false;
+    std::string reason;
+    bool attachOk = WaitForAttachResult(pid, &timedOut, &reason);
+    RelayDiagLog(pid); // Always — success or failure — so the caller sees what happened either way.
+    if (!attachOk) {
+        if (timedOut) {
+            fwprintf(stderr, L"Timed out waiting for the bridge to report attach result for pid %lu\n", pid);
+        } else {
+            fwprintf(stderr, L"Bridge loaded but InstallSubclass failed for pid %lu: %hs\n", pid, reason.c_str());
+        }
         return 1;
     }
 

@@ -58,7 +58,7 @@ HRESULT STDMETHODCALLTYPE ProviderRoot::GetPatternProvider(PATTERNID /*patternId
 HRESULT STDMETHODCALLTYPE ProviderRoot::GetPropertyValue(PROPERTYID propertyId, VARIANT* pRetVal) {
     if (!pRetVal) { return E_POINTER; }
     VariantInit(pRetVal);
-    AccessibleNodeInfo info = GetNodeInfo(rootRef_.acc.Get(), rootRef_.childId);
+    AccessibleNodeInfo info = GetNodeInfo(rootRef_);
 
     switch (propertyId) {
         case UIA_NamePropertyId:
@@ -117,7 +117,7 @@ HRESULT STDMETHODCALLTYPE ProviderRoot::GetRuntimeId(SAFEARRAY** pRetVal) {
 
 HRESULT STDMETHODCALLTYPE ProviderRoot::get_BoundingRectangle(UiaRect* pRetVal) {
     if (!pRetVal) { return E_POINTER; }
-    AccessibleNodeInfo info = GetNodeInfo(rootRef_.acc.Get(), rootRef_.childId);
+    AccessibleNodeInfo info = GetNodeInfo(rootRef_);
     pRetVal->left = info.rectScreen.left;
     pRetVal->top = info.rectScreen.top;
     pRetVal->width = info.rectScreen.right - info.rectScreen.left;
@@ -155,7 +155,7 @@ bool HitTestRecursive(HWND hwnd, ProviderRoot* root, ElementRegistry* registry,
                        IRawElementProviderFragment* parentFragment,
                        double x, double y, ProviderElement** outMatch) {
     for (auto& child : GetChildren(node)) {
-        AccessibleNodeInfo info = GetNodeInfo(child.acc.Get(), child.childId);
+        AccessibleNodeInfo info = GetNodeInfo(child);
         if (!RectContains(info.rectScreen, x, y)) { continue; }
         auto* childElement = new ProviderElement(hwnd, root, registry, child, node, parentFragment);
         ProviderElement* deeper = nullptr;

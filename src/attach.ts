@@ -1,5 +1,11 @@
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
+import { logger } from '@appium/support';
+
+// Plain console.log does not reliably reach Appium's own log stream/formatting — matches
+// appium-desktop-driver's own logging pattern (see its lib/util.js), which is what actually
+// surfaces in the server's log output regardless of how stdout is being captured/filtered.
+const log = logger.getLogger('uia-bridge');
 
 // __dirname is a CommonJS global (this package builds to CJS, matching @appium/tsconfig's
 // default and how Appium plugins are conventionally loaded) — no import.meta/fileURLToPath
@@ -103,8 +109,18 @@ export async function attachUiaBridge(hwnd: number): Promise<void> {
         child.on('error', reject);
         child.on('exit', (code) => {
             if (code !== 0) {
+                // Same detailed stderr as before (target hwnd's class/rect/enabled state, which
+                // WM_GETOBJECT path answered, every child found — see Injector.cpp's
+                // RelayDiagLog) — already carried in this rejection's message, so not also
+                // console.log'd here to avoid printing it twice.
                 reject(new Error(`appium-uia-bridge-injector.exe (${bitness}) exited with code ${code}: ${stderr.trim()}`));
                 return;
+            }
+            // On success there's no other channel back to the caller for this — without logging
+            // it here, a successful attach into an app with an empty/unexpected tree would leave
+            // no trace of *why*. Goes to the driver's own log stream, not the resolved value.
+            if (stderr.trim()) {
+                log.info(`attach diagnostics for hwnd ${hwnd}:\n${stderr.trim()}`);
             }
             resolve();
         });

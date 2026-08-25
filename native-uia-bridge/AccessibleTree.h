@@ -67,6 +67,10 @@ struct AccessibleNodeInfo {
 // UI code). Once the subclass IS installed, WM_GETOBJECT must never be sent via SendMessage from
 // inside our own handler, since that would recurse into ourselves — but that concern doesn't
 // apply here, since this call always happens first.
+//
+// Falls back to AccessibleObjectFromWindow if the target never answers WM_GETOBJECT itself — see
+// this function's own comment in the .cpp for why that's safe here despite the out-of-process
+// marshaling problem that originally motivated avoiding that API.
 HRESULT GetContainerAccessible(HWND hwnd, ComPtr<IAccessible>& outAcc);
 
 // Enumerates the direct children of `node` — both the MSAA-reported logical children
@@ -75,7 +79,13 @@ HRESULT GetContainerAccessible(HWND hwnd, ComPtr<IAccessible>& outAcc);
 // by hwnd. See AccessibleRef's comment for why both sources are needed.
 std::vector<AccessibleRef> GetChildren(const AccessibleRef& node);
 
-AccessibleNodeInfo GetNodeInfo(IAccessible* acc, const VARIANT& childId);
+// `ref.hwnd`, when set, unlocks two fallback sources tried in order whenever the MSAA accName
+// comes back empty: GetWindowTextW on the hwnd directly (bypasses MSAA entirely — some custom
+// controls answer window text even with broken/absent accessibility), then a second WM_GETOBJECT
+// probe against OBJID_WINDOW instead of OBJID_CLIENT (some apps only populate the window-frame
+// object's name, leaving the content object blank). Both are pure reads with no side effect on
+// the target; neither ever overwrites a name MSAA already gave us.
+AccessibleNodeInfo GetNodeInfo(const AccessibleRef& ref);
 
 // Invokes the node's default action (IAccessible::accDoDefaultAction) — the closest MSAA
 // equivalent of UIA's IInvokeProvider::Invoke.

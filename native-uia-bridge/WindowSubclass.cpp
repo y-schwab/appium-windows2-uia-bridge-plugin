@@ -5,6 +5,7 @@
 #include <uiautomation.h>
 
 #include "AccessibleTree.h"
+#include "Diagnostics.h"
 #include "ProviderRoot.h"
 
 #pragma comment(lib, "UIAutomationCore.lib") // UiaReturnRawElementProvider
@@ -20,6 +21,37 @@ struct SubclassEntry {
 
 std::mutex g_mutex;
 std::unordered_map<HWND, SubclassEntry> g_entries;
+
+// One-time (per attach), bounded diagnostic dump of what GetChildren() actually finds for the
+// root — this is the concrete, per-app answer to "what does this bridge see here at all,"
+// combining both the MSAA-logical-children path and the real-child-hwnd path (see GetChildren's
+// own comment in AccessibleTree.cpp for why both exist).
+void LogDiscoveredChildren(const AccessibleRef& rootRef) {
+    long msaaChildCount = -1;
+    if (rootRef.acc) {
+        rootRef.acc->get_accChildCount(&msaaChildCount);
+    }
+    auto children = GetChildren(rootRef);
+    DiagLog(L"Child discovery for root: MSAA get_accChildCount=%ld, GetChildren() (MSAA children + real child windows, deduplicated) returned %zu total",
+        msaaChildCount, children.size());
+
+    size_t shown = 0;
+    for (auto& child : children) {
+        if (shown >= 30) {
+            DiagLog(L"  ... %zu more children not shown (capped at 30)", children.size() - shown);
+            break;
+        }
+        AccessibleNodeInfo info = GetNodeInfo(child);
+        wchar_t childClass[256] = {};
+        if (child.hwnd) {
+            GetClassNameW(child.hwnd, childClass, ARRAYSIZE(childClass));
+        }
+        DiagLog(L"  [%zu] hwnd=0x%p class=\"%s\" controlType=\"%s\" name=\"%s\" value=\"%s\" rect={l:%ld,t:%ld,r:%ld,b:%ld} enabled=%d",
+            shown, child.hwnd, childClass, info.controlType.c_str(), info.name.c_str(), info.value.c_str(),
+            info.rectScreen.left, info.rectScreen.top, info.rectScreen.right, info.rectScreen.bottom, info.isEnabled);
+        ++shown;
+    }
+}
 
 LRESULT CALLBACK SubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     WNDPROC original = nullptr;
@@ -60,22 +92,37 @@ LRESULT CALLBACK SubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
 } // namespace
 
-bool InstallSubclass(HWND hwnd) {
+bool InstallSubclass(HWND hwnd, std::wstring* outError) {
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (g_entries.find(hwnd) != g_entries.end()) {
-            return false; // Already subclassed.
+            DiagLog(L"InstallSubclass(0x%p): already subclassed by this DLL", hwnd);
+            if (outError) { *outError = L"hwnd is already subclassed by this DLL"; }
+            return false;
         }
     }
 
     WNDPROC originalProc = reinterpret_cast<WNDPROC>(GetWindowLongPtrW(hwnd, GWLP_WNDPROC));
     if (!originalProc) {
+        DiagLog(L"InstallSubclass(0x%p): GetWindowLongPtrW(GWLP_WNDPROC) returned null (error %lu)", hwnd, GetLastError());
+        if (outError) { *outError = L"GetWindowLongPtrW(GWLP_WNDPROC) returned null"; }
         return false;
     }
 
     ComPtr<IAccessible> containerAcc;
-    if (FAILED(GetContainerAccessible(hwnd, containerAcc)) || !containerAcc) {
-        return false; // Nothing to bridge — the container answered WM_GETOBJECT with no IAccessible.
+    HRESULT containerHr = GetContainerAccessible(hwnd, containerAcc);
+    if (FAILED(containerHr) || !containerAcc) {
+        // Nothing to bridge — neither the target's own WM_GETOBJECT handler nor
+        // AccessibleObjectFromWindow's generic-proxy fallback produced anything (see the
+        // GetContainerAccessible-level DiagLog calls just above this in the log for which of the
+        // two paths was tried and why each failed).
+        DiagLog(L"InstallSubclass(0x%p): GetContainerAccessible failed (hr=0x%08lX) — nothing to bridge", hwnd, static_cast<unsigned long>(containerHr));
+        if (outError) {
+            wchar_t buf[128];
+            swprintf_s(buf, L"GetContainerAccessible failed (hr=0x%08lX) — target's WM_GETOBJECT(OBJID_CLIENT) returned no IAccessible", static_cast<unsigned long>(containerHr));
+            *outError = buf;
+        }
+        return false;
     }
 
     AccessibleRef rootRef;
@@ -83,6 +130,8 @@ bool InstallSubclass(HWND hwnd) {
     rootRef.childId.vt = VT_I4;
     rootRef.childId.lVal = CHILDID_SELF;
     rootRef.hwnd = hwnd; // Lets GetChildren() also walk the container's real child windows, not just its own MSAA-reported children.
+
+    LogDiscoveredChildren(rootRef);
 
     auto* root = new ProviderRoot(hwnd, rootRef);
 
@@ -94,12 +143,22 @@ bool InstallSubclass(HWND hwnd) {
     SetLastError(0);
     LONG_PTR previous = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(SubclassProc));
     if (previous == 0 && GetLastError() != 0) {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        g_entries.erase(hwnd);
+        DWORD lastError = GetLastError();
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            g_entries.erase(hwnd);
+        }
         root->Release();
+        DiagLog(L"InstallSubclass(0x%p): SetWindowLongPtrW(GWLP_WNDPROC) failed (error %lu)", hwnd, lastError);
+        if (outError) {
+            wchar_t buf[96];
+            swprintf_s(buf, L"SetWindowLongPtrW(GWLP_WNDPROC) failed (error %lu)", lastError);
+            *outError = buf;
+        }
         return false;
     }
 
+    DiagLog(L"InstallSubclass(0x%p): subclass installed successfully", hwnd);
     return true;
 }
 
