@@ -6,7 +6,6 @@
 
 #include "AccessibleTree.h"
 #include "Diagnostics.h"
-#include "OleControlTree.h"
 #include "ProviderRoot.h"
 
 #pragma comment(lib, "UIAutomationCore.lib") // UiaReturnRawElementProvider
@@ -131,21 +130,6 @@ bool InstallSubclass(HWND hwnd, std::wstring* outError) {
     rootRef.childId.vt = VT_I4;
     rootRef.childId.lVal = CHILDID_SELF;
     rootRef.hwnd = hwnd; // Lets GetChildren() also walk the container's real child windows, not just its own MSAA-reported children.
-
-    // Second, independent discovery source (OleControlTree.h): the Forms 2.0 OLE embedding model,
-    // reached via WM_GETOBJECT(OBJID_NATIVEOM) — bypasses MSAA (and its often-thin Forms 2.0 proxy)
-    // entirely for these windowless controls. When it succeeds, GetChildren()/GetNodeInfo() prefer
-    // it over rootRef.acc's MSAA data (see AccessibleTree.cpp) — rootRef.acc is kept regardless as
-    // the fallback for whatever the OLE path doesn't cover. Must also run before the subclass is
-    // installed, same reasoning as GetContainerAccessible above.
-    ComPtr<IDispatch> rootOleDispatch;
-    HRESULT oleHr = GetRootOleDispatch(hwnd, rootOleDispatch);
-    if (SUCCEEDED(oleHr) && rootOleDispatch) {
-        rootRef.oleControl = rootOleDispatch;
-        DiagLog(L"InstallSubclass(0x%p): OLE native-object-model discovery succeeded — preferring it over MSAA for name/value/enabled", hwnd);
-    } else {
-        DiagLog(L"InstallSubclass(0x%p): OLE native-object-model discovery unavailable (hr=0x%08lX) — using MSAA only", hwnd, static_cast<unsigned long>(oleHr));
-    }
 
     LogDiscoveredChildren(rootRef);
 

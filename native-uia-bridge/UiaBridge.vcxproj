@@ -69,7 +69,7 @@
     <ClCompile Include="Diagnostics.cpp" />
     <ClCompile Include="DllMain.cpp" />
     <ClCompile Include="ElementRegistry.cpp" />
-    <ClCompile Include="OleControlTree.cpp" />
+    <ClCompile Include="GdiTextCapture.cpp" />
     <ClCompile Include="ProviderElement.cpp" />
     <ClCompile Include="ProviderRoot.cpp" />
     <ClCompile Include="WindowSubclass.cpp" />
@@ -80,7 +80,7 @@
     <ClInclude Include="ComPtr.h" />
     <ClInclude Include="Diagnostics.h" />
     <ClInclude Include="ElementRegistry.h" />
-    <ClInclude Include="OleControlTree.h" />
+    <ClInclude Include="GdiTextCapture.h" />
     <ClInclude Include="ProviderElement.h" />
     <ClInclude Include="ProviderRoot.h" />
     <ClInclude Include="UiaMapping.h" />

@@ -10,6 +10,7 @@
 #include <string>
 
 #include "Diagnostics.h"
+#include "GdiTextCapture.h"
 #include "WindowSubclass.h"
 
 namespace {
@@ -79,10 +80,20 @@ bool ReadHandshakeHwnd(HWND* outHwnd) {
 DWORD WINAPI AttachWorker(LPVOID) {
     UiaBridge::DiagLog(L"AttachWorker started, pid=%lu", GetCurrentProcessId());
 
-    // Decisive, cheap check for what's actually behind the target's control classname before
-    // assuming anything about it (see LogLoadedModules' own doc comment) — process-wide info, so
-    // logged unconditionally here rather than gated behind hwnd/attach success.
-    UiaBridge::LogLoadedModules();
+    // FM20.DLL (genuine Microsoft Forms 2.0) confirmed loaded in this process, but neither MSAA
+    // nor its OLE native-object-model answer WM_GETOBJECT anywhere in this app's tree — see
+    // NEXT_STEPS.md. GDI text-draw capture is the fallback: hook FM20's own paint calls so
+    // GetNodeInfo (AccessibleTree.cpp) can read back whatever text actually got painted into a
+    // control's hwnd, regardless of what (broken) accessibility plumbing sits behind it. Installed
+    // early/unconditionally, independent of which hwnd attach ends up targeting — paints can start
+    // arriving before InstallSubclass even runs.
+    HMODULE fm20 = GetModuleHandleW(L"FM20.DLL");
+    if (fm20) {
+        bool hooked = UiaBridge::InstallGdiTextHooks(fm20);
+        UiaBridge::DiagLog(L"InstallGdiTextHooks(FM20.DLL) -> %s", hooked ? L"installed" : L"FAILED");
+    } else {
+        UiaBridge::DiagLog(L"FM20.DLL not loaded in this process — skipping GDI text-draw hook");
+    }
 
     // This is a bare CreateThread thread — no apartment is initialized on it by anything else in
     // the process. GetContainerAccessible's ObjectFromLresult call unmarshals a COM interface

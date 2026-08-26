@@ -1,6 +1,6 @@
 #include "AccessibleTree.h"
 #include "Diagnostics.h"
-#include "OleControlTree.h"
+#include "GdiTextCapture.h"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -152,19 +152,6 @@ namespace {
 // reached again once we recurse into each direct child's own GetChildren() call. GetWindow's
 // GW_CHILD/GW_HWNDNEXT chain gives just the immediate children, matching how the MSAA side of
 // this function only reports one level too.
-// Tried for every node that turns out to be backed by its own real hwnd — not just the root (see
-// InstallSubclass in WindowSubclass.cpp for the root's own copy of this same probe). Each
-// individually-hosted control (e.g. one of several sibling `F3 Server 60000000` windows, one per
-// embedded Forms 2.0 control) is exactly the shape OBJID_NATIVEOM targets; skipping this for
-// anything but the root would leave every one of those un-enriched.
-void TryAttachOleControl(AccessibleRef& ref) {
-    if (!ref.hwnd) { return; }
-    ComPtr<IDispatch> ole;
-    if (SUCCEEDED(GetRootOleDispatch(ref.hwnd, ole)) && ole) {
-        ref.oleControl = ole;
-    }
-}
-
 std::vector<HWND> GetDirectChildWindows(HWND hwnd) {
     std::vector<HWND> result;
     for (HWND child = GetWindow(hwnd, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT)) {
@@ -178,35 +165,6 @@ std::vector<HWND> GetDirectChildWindows(HWND hwnd) {
 } // namespace
 
 std::vector<AccessibleRef> GetChildren(const AccessibleRef& node) {
-    if (node.oleControl) {
-        // OLE-sourced subtree (OleControlTree.h) — entirely separate from the MSAA discovery
-        // below. `node.acc` being also set marks this specifically as the root (see
-        // WindowSubclass.cpp's InstallSubclass, which sets both on rootRef), whose parent screen
-        // rect is the container window's own client area; any deeper node reached only `acc`-less,
-        // via a prior GetChildren() call in this same branch, so its parent rect is its own
-        // already-resolved GetNodeInfo() rect.
-        RECT parentScreenRect{};
-        if (node.acc && node.hwnd) {
-            RECT clientRect{};
-            GetClientRect(node.hwnd, &clientRect);
-            POINT origin{ 0, 0 };
-            ClientToScreen(node.hwnd, &origin);
-            parentScreenRect = { origin.x, origin.y, origin.x + clientRect.right, origin.y + clientRect.bottom };
-        } else {
-            parentScreenRect = GetNodeInfo(node).rectScreen;
-        }
-
-        std::vector<AccessibleRef> oleResult;
-        for (auto& childDispatch : EnumOleChildrenOfDispatch(node.oleControl.Get())) {
-            AccessibleRef ref;
-            ref.oleControl = childDispatch;
-            ref.hwnd = node.hwnd; // same top-level window throughout — used only for DPI lookup, see GetNodeInfo
-            ref.oleParentScreenRect = parentScreenRect;
-            oleResult.push_back(ref);
-        }
-        return oleResult;
-    }
-
     std::vector<AccessibleRef> result;
     std::vector<HWND> coveredHwnds; // hwnds already added via the MSAA path, skipped in the window-enum pass below
 
@@ -233,7 +191,6 @@ std::vector<AccessibleRef> GetChildren(const AccessibleRef& node) {
                             if (SUCCEEDED(WindowFromAccessibleObject(ref.acc.Get(), &childHwnd)) && childHwnd) {
                                 ref.hwnd = childHwnd;
                                 coveredHwnds.push_back(childHwnd);
-                                TryAttachOleControl(ref);
                             }
                             result.push_back(ref);
                         }
@@ -267,7 +224,6 @@ std::vector<AccessibleRef> GetChildren(const AccessibleRef& node) {
             ref.childId.vt = VT_I4;
             ref.childId.lVal = CHILDID_SELF;
             ref.hwnd = childHwnd;
-            TryAttachOleControl(ref);
             result.push_back(ref);
         }
     }
@@ -283,37 +239,6 @@ AccessibleNodeInfo GetNodeInfo(const AccessibleRef& ref) {
     // not MSAA's often-thin Forms 2.0 proxy). `haveOleInfo` gates the MSAA assignments below so a
     // root node (which carries both `oleControl` and `acc` — see WindowSubclass.cpp) doesn't have
     // its OLE-sourced fields clobbered by the MSAA pass that still runs for it (root's rect is
-    // still sourced from MSAA's accLocation; there's no "parent" to convert OLE points against).
-    bool haveOleInfo = false;
-    if (ref.oleControl) {
-        OleControlInfo oi = GetOleControlInfo(ref.oleControl.Get());
-        info.name = oi.name;
-        info.controlType = oi.controlType.empty() ? L"Custom" : oi.controlType;
-        info.value = oi.text;
-        info.helpText = oi.helpText;
-        info.accessKey = oi.accessKey;
-        info.isEnabled = oi.enabled;
-        info.automationId = oi.name; // real VBA-assigned Name — better than the synthesized fallback below
-        haveOleInfo = true;
-
-        if (!ref.acc) {
-            // Pure OLE node (not the root) — no MSAA to fall back to at all, including for rect:
-            // convert the control's own Left/Top/Width/Height (points, parent-relative) to screen
-            // pixels using the parent's already-resolved screen rect and this window's DPI.
-            UINT dpi = ref.hwnd ? GetDpiForWindow(ref.hwnd) : 96;
-            double scale = dpi / 72.0; // points -> pixels
-            const RECT& local = oi.rectPointsLocal;
-            const RECT& parent = ref.oleParentScreenRect;
-            info.rectScreen = {
-                parent.left + static_cast<long>(std::lround(local.left * scale)),
-                parent.top + static_cast<long>(std::lround(local.top * scale)),
-                parent.left + static_cast<long>(std::lround(local.right * scale)),
-                parent.top + static_cast<long>(std::lround(local.bottom * scale)),
-            };
-            return info;
-        }
-    }
-
     IAccessible* acc = ref.acc.Get();
     if (!acc) {
         return info;
@@ -321,52 +246,61 @@ AccessibleNodeInfo GetNodeInfo(const AccessibleRef& ref) {
 
     VARIANT selfId = ref.childId;
 
-    if (!haveOleInfo) {
-        BSTR name = nullptr;
-        if (SUCCEEDED(acc->get_accName(selfId, &name)) && name) {
-            info.name.assign(name, SysStringLen(name));
-            SysFreeString(name);
-        }
+    BSTR name = nullptr;
+    if (SUCCEEDED(acc->get_accName(selfId, &name)) && name) {
+        info.name.assign(name, SysStringLen(name));
+        SysFreeString(name);
+    }
 
-        // Only ever fills a name MSAA left blank — never overwrites what accName already gave us.
-        if (info.name.empty() && ref.hwnd) {
-            info.name = TryGetWindowText(ref.hwnd);
-        }
-        if (info.name.empty() && ref.hwnd) {
-            info.name = TryGetWindowObjectName(ref.hwnd);
-        }
+    // Only ever fills a name MSAA left blank — never overwrites what accName already gave us.
+    if (info.name.empty() && ref.hwnd) {
+        info.name = TryGetWindowText(ref.hwnd);
+    }
+    if (info.name.empty() && ref.hwnd) {
+        info.name = TryGetWindowObjectName(ref.hwnd);
+    }
 
-        VARIANT role;
-        VariantInit(&role);
-        if (SUCCEEDED(acc->get_accRole(selfId, &role))) {
-            info.controlType = RoleToControlType(role);
-        }
-        VariantClear(&role);
+    VARIANT role;
+    VariantInit(&role);
+    if (SUCCEEDED(acc->get_accRole(selfId, &role))) {
+        info.controlType = RoleToControlType(role);
+    }
+    VariantClear(&role);
 
-        BSTR value = nullptr;
-        if (SUCCEEDED(acc->get_accValue(selfId, &value)) && value) {
-            info.value.assign(value, SysStringLen(value));
-            SysFreeString(value);
-        }
+    BSTR value = nullptr;
+    if (SUCCEEDED(acc->get_accValue(selfId, &value)) && value) {
+        info.value.assign(value, SysStringLen(value));
+        SysFreeString(value);
+    }
 
-        VARIANT state;
-        VariantInit(&state);
-        if (SUCCEEDED(acc->get_accState(selfId, &state)) && state.vt == VT_I4) {
-            info.isEnabled = (state.lVal & STATE_SYSTEM_UNAVAILABLE) == 0;
-        }
-        VariantClear(&state);
+    VARIANT state;
+    VariantInit(&state);
+    if (SUCCEEDED(acc->get_accState(selfId, &state)) && state.vt == VT_I4) {
+        info.isEnabled = (state.lVal & STATE_SYSTEM_UNAVAILABLE) == 0;
+    }
+    VariantClear(&state);
 
-        // Available via the same IAccessible we already have, but never previously read: exact
-        // UIA counterparts (HelpText / AccessKey) exist and are simply unpopulated today.
-        BSTR description = nullptr;
-        if (SUCCEEDED(acc->get_accDescription(selfId, &description)) && description) {
-            info.helpText.assign(description, SysStringLen(description));
-            SysFreeString(description);
-        }
-        BSTR keyboardShortcut = nullptr;
-        if (SUCCEEDED(acc->get_accKeyboardShortcut(selfId, &keyboardShortcut)) && keyboardShortcut) {
-            info.accessKey.assign(keyboardShortcut, SysStringLen(keyboardShortcut));
-            SysFreeString(keyboardShortcut);
+    // Available via the same IAccessible we already have, but never previously read: exact
+    // UIA counterparts (HelpText / AccessKey) exist and are simply unpopulated today.
+    BSTR description = nullptr;
+    if (SUCCEEDED(acc->get_accDescription(selfId, &description)) && description) {
+        info.helpText.assign(description, SysStringLen(description));
+        SysFreeString(description);
+    }
+    BSTR keyboardShortcut = nullptr;
+    if (SUCCEEDED(acc->get_accKeyboardShortcut(selfId, &keyboardShortcut)) && keyboardShortcut) {
+        info.accessKey.assign(keyboardShortcut, SysStringLen(keyboardShortcut));
+        SysFreeString(keyboardShortcut);
+    }
+
+    // Last-resort fallback (see NEXT_STEPS.md, path 1): MSAA/window-text gave nothing for this
+    // node's name/value (the common case for the F3 Server 60000000 children, whose accessibility
+    // plumbing is confirmed broken at the host-app level) — fall back to whatever GDI text was
+    // actually painted into this hwnd's DC, captured via GdiTextCapture's IAT hook on FM20.DLL.
+    if (ref.hwnd && info.name.empty() && info.value.empty()) {
+        std::wstring painted = GetLastPaintedText(ref.hwnd);
+        if (!painted.empty()) {
+            info.value = painted;
         }
     }
 
@@ -375,11 +309,9 @@ AccessibleNodeInfo GetNodeInfo(const AccessibleRef& ref) {
         info.rectScreen = { x, y, x + w, y + h };
     }
 
-    if (!haveOleInfo) {
-        // No real automation-id concept in MSAA — see MatchesLocator's docs. Synthesize one from
-        // role + name so callers get a stable-ish handle for logging/debugging, not for locating.
-        info.automationId = info.controlType + L":" + info.name;
-    }
+    // No real automation-id concept in MSAA — see MatchesLocator's docs. Synthesize one from
+    // role + name so callers get a stable-ish handle for logging/debugging, not for locating.
+    info.automationId = info.controlType + L":" + info.name;
 
     return info;
 }
