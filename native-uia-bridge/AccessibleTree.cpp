@@ -40,6 +40,7 @@ std::wstring RoleToControlType(const VARIANT& roleVariant) {
         case ROLE_SYSTEM_PANE: return L"Pane";
         case ROLE_SYSTEM_CLIENT: return L"Pane";
         case ROLE_SYSTEM_WINDOW: return L"Window";
+        case ROLE_SYSTEM_DIALOG: return L"Window"; // UIA has no distinct "Dialog" control type — a dialog is a Window (matches native Inspect against this exact target: ControlType=Window, LocalizedControlType="dialog")
         case ROLE_SYSTEM_MENUITEM: return L"MenuItem";
         case ROLE_SYSTEM_SCROLLBAR: return L"ScrollBar";
         default: {

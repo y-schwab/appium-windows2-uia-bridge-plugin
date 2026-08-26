@@ -67,7 +67,11 @@ HRESULT STDMETHODCALLTYPE ProviderRoot::GetPropertyValue(PROPERTYID propertyId, 
             break;
         case UIA_ControlTypePropertyId:
             pRetVal->vt = VT_I4;
-            pRetVal->lVal = UIA_PaneControlTypeId; // The container is a generic content pane.
+            // Derived from the real MSAA role (RoleToControlType in AccessibleTree.cpp) — was
+            // hardcoded to Pane, which regressed the root's UIA ControlType from Window to Pane
+            // once bridged (confirmed via before/after page-source diff: native Inspect reports
+            // ControlType=Window/"dialog" for this exact target's #32770 root).
+            pRetVal->lVal = ControlTypeNameToUiaId(info.controlType);
             break;
         case UIA_IsEnabledPropertyId:
             pRetVal->vt = VT_BOOL;
@@ -117,11 +121,21 @@ HRESULT STDMETHODCALLTYPE ProviderRoot::GetRuntimeId(SAFEARRAY** pRetVal) {
 
 HRESULT STDMETHODCALLTYPE ProviderRoot::get_BoundingRectangle(UiaRect* pRetVal) {
     if (!pRetVal) { return E_POINTER; }
-    AccessibleNodeInfo info = GetNodeInfo(rootRef_);
-    pRetVal->left = info.rectScreen.left;
-    pRetVal->top = info.rectScreen.top;
-    pRetVal->width = info.rectScreen.right - info.rectScreen.left;
-    pRetVal->height = info.rectScreen.bottom - info.rectScreen.top;
+    // Deliberately NOT GetNodeInfo(rootRef_).rectScreen: that comes from accLocation on the
+    // generic-proxy IAccessible (GetContainerAccessible's fallback path, the only one this target
+    // ever answers with — see NEXT_STEPS.md), which reports the CLIENT rect, not the window rect.
+    // UIA's own top-level window elements always report the full window rect (title bar
+    // included), and every child's rect elsewhere in this tree is an absolute screen rect derived
+    // from the real hwnd — mixing a client-rect root with window-rect-relative children shifted
+    // every descendant's apparent position by the title bar's height once bridged (confirmed via
+    // before/after page-source diff). GetWindowRect sidesteps accLocation entirely and matches
+    // what native Inspect reports for this same hwnd unbridged.
+    RECT rect{};
+    GetWindowRect(hwnd_, &rect);
+    pRetVal->left = rect.left;
+    pRetVal->top = rect.top;
+    pRetVal->width = rect.right - rect.left;
+    pRetVal->height = rect.bottom - rect.top;
     return S_OK;
 }
 
