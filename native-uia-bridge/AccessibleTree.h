@@ -65,6 +65,8 @@ struct AccessibleNodeInfo {
     std::wstring controlType; // approximate UIA-style control type name, mapped from the MSAA role
     std::wstring automationId; // synthetic — see FindMatching()'s "accessibility id" note
     std::wstring value;
+    std::wstring helpText; // MSAA accDescription, or OLE ControlTipText — see GetNodeInfo
+    std::wstring accessKey; // MSAA accKeyboardShortcut, or OLE Accelerator — see GetNodeInfo
     bool isEnabled = true;
     RECT rectScreen{};
 };

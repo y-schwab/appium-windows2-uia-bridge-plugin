@@ -204,6 +204,8 @@ OleControlInfo GetOleControlInfo(IDispatch* dispatch) {
 
     GetBoolProperty(dispatch, L"Enabled", &info.enabled);
     GetBoolProperty(dispatch, L"Visible", &info.visible);
+    GetStringProperty(dispatch, L"ControlTipText", &info.helpText);
+    GetStringProperty(dispatch, L"Accelerator", &info.accessKey);
 
     long left = 0, top = 0, width = 0, height = 0;
     GetLongProperty(dispatch, L"Left", &left);

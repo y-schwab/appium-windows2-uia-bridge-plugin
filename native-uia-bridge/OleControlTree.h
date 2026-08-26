@@ -37,6 +37,8 @@ struct OleControlInfo {
     std::wstring name;         // control's real VBA-assigned Name property
     std::wstring controlType;  // ProgID via IPersist::GetClassID, e.g. "Forms.CommandButton.1" — empty if unavailable
     std::wstring text;         // Caption, else Text, else Value — whichever the control actually has
+    std::wstring helpText;     // ControlTipText — the control's own designer-set tooltip, if any
+    std::wstring accessKey;    // Accelerator — the single-character mnemonic key, if any
     bool enabled = true;
     bool visible = true;
     RECT rectPointsLocal{};    // Left/Top/Width/Height in points, relative to the immediate parent's client origin

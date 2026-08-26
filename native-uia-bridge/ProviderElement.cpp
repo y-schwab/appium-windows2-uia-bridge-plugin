@@ -93,6 +93,20 @@ HRESULT STDMETHODCALLTYPE ProviderElement::GetPropertyValue(PROPERTYID propertyI
             pRetVal->vt = VT_I4;
             pRetVal->lVal = ControlTypeNameToUiaId(info.controlType);
             break;
+        case UIA_AutomationIdPropertyId:
+            // Already extracted by GetNodeInfo (real OLE control Name when available, else a
+            // synthesized role:name fallback) but never previously surfaced here.
+            pRetVal->vt = VT_BSTR;
+            pRetVal->bstrVal = SysAllocString(info.automationId.c_str());
+            break;
+        case UIA_HelpTextPropertyId:
+            pRetVal->vt = VT_BSTR;
+            pRetVal->bstrVal = SysAllocString(info.helpText.c_str());
+            break;
+        case UIA_AccessKeyPropertyId:
+            pRetVal->vt = VT_BSTR;
+            pRetVal->bstrVal = SysAllocString(info.accessKey.c_str());
+            break;
         case UIA_IsEnabledPropertyId:
             pRetVal->vt = VT_BOOL;
             pRetVal->boolVal = info.isEnabled ? VARIANT_TRUE : VARIANT_FALSE;

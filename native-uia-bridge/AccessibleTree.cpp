@@ -152,6 +152,19 @@ namespace {
 // reached again once we recurse into each direct child's own GetChildren() call. GetWindow's
 // GW_CHILD/GW_HWNDNEXT chain gives just the immediate children, matching how the MSAA side of
 // this function only reports one level too.
+// Tried for every node that turns out to be backed by its own real hwnd — not just the root (see
+// InstallSubclass in WindowSubclass.cpp for the root's own copy of this same probe). Each
+// individually-hosted control (e.g. one of several sibling `F3 Server 60000000` windows, one per
+// embedded Forms 2.0 control) is exactly the shape OBJID_NATIVEOM targets; skipping this for
+// anything but the root would leave every one of those un-enriched.
+void TryAttachOleControl(AccessibleRef& ref) {
+    if (!ref.hwnd) { return; }
+    ComPtr<IDispatch> ole;
+    if (SUCCEEDED(GetRootOleDispatch(ref.hwnd, ole)) && ole) {
+        ref.oleControl = ole;
+    }
+}
+
 std::vector<HWND> GetDirectChildWindows(HWND hwnd) {
     std::vector<HWND> result;
     for (HWND child = GetWindow(hwnd, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT)) {
@@ -220,6 +233,7 @@ std::vector<AccessibleRef> GetChildren(const AccessibleRef& node) {
                             if (SUCCEEDED(WindowFromAccessibleObject(ref.acc.Get(), &childHwnd)) && childHwnd) {
                                 ref.hwnd = childHwnd;
                                 coveredHwnds.push_back(childHwnd);
+                                TryAttachOleControl(ref);
                             }
                             result.push_back(ref);
                         }
@@ -253,6 +267,7 @@ std::vector<AccessibleRef> GetChildren(const AccessibleRef& node) {
             ref.childId.vt = VT_I4;
             ref.childId.lVal = CHILDID_SELF;
             ref.hwnd = childHwnd;
+            TryAttachOleControl(ref);
             result.push_back(ref);
         }
     }
@@ -275,6 +290,8 @@ AccessibleNodeInfo GetNodeInfo(const AccessibleRef& ref) {
         info.name = oi.name;
         info.controlType = oi.controlType.empty() ? L"Custom" : oi.controlType;
         info.value = oi.text;
+        info.helpText = oi.helpText;
+        info.accessKey = oi.accessKey;
         info.isEnabled = oi.enabled;
         info.automationId = oi.name; // real VBA-assigned Name — better than the synthesized fallback below
         haveOleInfo = true;
@@ -338,6 +355,19 @@ AccessibleNodeInfo GetNodeInfo(const AccessibleRef& ref) {
             info.isEnabled = (state.lVal & STATE_SYSTEM_UNAVAILABLE) == 0;
         }
         VariantClear(&state);
+
+        // Available via the same IAccessible we already have, but never previously read: exact
+        // UIA counterparts (HelpText / AccessKey) exist and are simply unpopulated today.
+        BSTR description = nullptr;
+        if (SUCCEEDED(acc->get_accDescription(selfId, &description)) && description) {
+            info.helpText.assign(description, SysStringLen(description));
+            SysFreeString(description);
+        }
+        BSTR keyboardShortcut = nullptr;
+        if (SUCCEEDED(acc->get_accKeyboardShortcut(selfId, &keyboardShortcut)) && keyboardShortcut) {
+            info.accessKey.assign(keyboardShortcut, SysStringLen(keyboardShortcut));
+            SysFreeString(keyboardShortcut);
+        }
     }
 
     long x = 0, y = 0, w = 0, h = 0;
