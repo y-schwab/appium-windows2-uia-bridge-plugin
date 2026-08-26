@@ -32,8 +32,17 @@ struct AccessibleRef {
     VARIANT childId{};
     HWND hwnd = nullptr;
 
+    // Set instead of (root) or in addition to (root only — see OleControlTree.h) `acc` when this
+    // node was discovered via the OLE-embedding / native-object-model path (OleControlTree.h)
+    // rather than MSAA. `oleParentScreenRect` is this node's immediate parent's already-resolved
+    // screen rect, needed to convert the control's own Left/Top (points, parent-relative) into
+    // screen coordinates — see GetNodeInfo's oleControl branch in AccessibleTree.cpp.
+    ComPtr<IDispatch> oleControl;
+    RECT oleParentScreenRect{};
+
     AccessibleRef() { VariantInit(&childId); }
-    AccessibleRef(const AccessibleRef& other) : acc(other.acc), hwnd(other.hwnd) {
+    AccessibleRef(const AccessibleRef& other)
+        : acc(other.acc), hwnd(other.hwnd), oleControl(other.oleControl), oleParentScreenRect(other.oleParentScreenRect) {
         VariantInit(&childId);
         VariantCopy(&childId, const_cast<VARIANT*>(&other.childId));
     }
@@ -41,6 +50,8 @@ struct AccessibleRef {
         if (this != &other) {
             acc = other.acc;
             hwnd = other.hwnd;
+            oleControl = other.oleControl;
+            oleParentScreenRect = other.oleParentScreenRect;
             VariantClear(&childId);
             VariantCopy(&childId, const_cast<VARIANT*>(&other.childId));
         }

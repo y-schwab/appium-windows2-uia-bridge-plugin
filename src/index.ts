@@ -3,11 +3,15 @@ import type { ExecuteMethodMap, ExternalDriver, NextPluginCallback } from '@appi
 import { attachUiaBridge as runAttach } from './attach.js';
 
 /**
- * Injects `appium-uia-bridge.dll` into the process that owns `elementId` (typically the
- * `F3 Server 60000000` / Forms 2.0 container hwnd). Reads `NativeWindowHandle` via the driver's
- * standard `getProperty` — the same generic, unfiltered UIA property passthrough
- * appium-desktop-driver already uses internally — so this plugin needs no driver-side changes to
- * resolve the target hwnd.
+ * Injects `appium-uia-bridge.dll` into the process owning the driver's *current* window — the
+ * one the caller already switched to (e.g. via `setWindow`/`changeRootElement`) before calling
+ * this, typically the `F3 Server 60000000` / Forms 2.0 container hwnd. Takes no parameters:
+ * rather than trust a caller-supplied `elementId` (which may point at some arbitrary located
+ * element, not necessarily the session's actual top-level container window), this reads
+ * `NativeWindowHandle` off the driver's own root element — `saveRootElementToTable`, the same
+ * command appium-desktop-driver uses internally everywhere it needs "whatever window the session
+ * is currently on" (see e.g. its lib/commands/app.ts) — so this plugin needs no driver-side
+ * changes to resolve the target hwnd, and no ambiguity about which element's hwnd is meant.
  *
  * Nothing else is needed after this resolves: once the DLL answers WM_GETOBJECT for that hwnd,
  * the container's children become part of the real UI Automation tree, stitched in via
@@ -18,24 +22,27 @@ async function attachUiaBridge(
     this: UiaBridgePlugin,
     _next: NextPluginCallback,
     driver: ExternalDriver,
-    elementId: string,
 ): Promise<void> {
-    // Server-side driver method — matches appium-desktop-driver's own lib/commands/element.ts
-    // `getProperty(propertyName, elementId)`, not the client-facing WebDriver command name
-    // (`getElementProperty`), which doesn't exist on the driver instance itself.
-    const hwndProperty = await (driver as ExternalDriver & {
+    // Both are server-side driver methods, not client-facing WebDriver command names — matches
+    // appium-desktop-driver's own internal usage (lib/driver.ts's sendCommand, lib/commands/
+    // element.ts's getProperty(propertyName, elementId)) — neither exists on the generic
+    // ExternalDriver type, hence the inline cast.
+    const typedDriver = driver as ExternalDriver & {
+        sendCommand: (method: string, params?: Record<string, unknown>) => Promise<unknown>;
         getProperty: (name: string, elementId: string) => Promise<string>;
-    }).getProperty('NativeWindowHandle', elementId);
+    };
+    const rootElementId = await typedDriver.sendCommand('saveRootElementToTable', {}) as string;
+    const hwndProperty = await typedDriver.getProperty('NativeWindowHandle', rootElementId);
     const hwnd = Number(hwndProperty);
     if (!Number.isInteger(hwnd) || hwnd <= 0) {
-        throw new Error(`Element ${elementId} did not report a valid NativeWindowHandle (got: ${hwndProperty})`);
+        throw new Error(`The driver's current window did not report a valid NativeWindowHandle (got: ${hwndProperty}) — switch to the right window (e.g. via setWindow) before calling windows: attachUiaBridge.`);
     }
     await runAttach(hwnd);
 }
 
 export class UiaBridgePlugin extends BasePlugin {
     static override executeMethodMap: ExecuteMethodMap<UiaBridgePlugin> = {
-        'windows: attachUiaBridge': { command: 'attachUiaBridge', params: { required: ['elementId'] } },
+        'windows: attachUiaBridge': { command: 'attachUiaBridge' },
     };
 
     attachUiaBridge = attachUiaBridge;
