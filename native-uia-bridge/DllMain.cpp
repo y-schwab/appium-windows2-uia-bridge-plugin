@@ -79,6 +79,11 @@ bool ReadHandshakeHwnd(HWND* outHwnd) {
 DWORD WINAPI AttachWorker(LPVOID) {
     UiaBridge::DiagLog(L"AttachWorker started, pid=%lu", GetCurrentProcessId());
 
+    // Decisive, cheap check for what's actually behind the target's control classname before
+    // assuming anything about it (see LogLoadedModules' own doc comment) — process-wide info, so
+    // logged unconditionally here rather than gated behind hwnd/attach success.
+    UiaBridge::LogLoadedModules();
+
     // This is a bare CreateThread thread — no apartment is initialized on it by anything else in
     // the process. GetContainerAccessible's ObjectFromLresult call unmarshals a COM interface
     // pointer out of the WM_GETOBJECT reply, and per its own documentation requires
