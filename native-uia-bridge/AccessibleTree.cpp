@@ -297,7 +297,16 @@ AccessibleNodeInfo GetNodeInfo(const AccessibleRef& ref) {
     // node's name/value (the common case for the F3 Server 60000000 children, whose accessibility
     // plumbing is confirmed broken at the host-app level) — fall back to whatever GDI text was
     // actually painted into this hwnd's DC, captured via GdiTextCapture's IAT hook on FM20.DLL.
+    // GetLastPaintedText only has something to report once a paint has actually happened through
+    // a hooked call since the hook was installed — these controls draw themselves once at
+    // window-open and don't repaint on their own, so the capture map would otherwise stay empty
+    // forever. Force one here: InvalidateRect+UpdateWindow, called cross-thread like this,
+    // dispatches WM_PAINT directly to the target's own wndproc (the same SendMessage-style
+    // blocking semantics WM_GETOBJECT already relies on elsewhere in this codebase) — synchronous,
+    // so the hooked GDI calls have already run by the time UpdateWindow returns.
     if (ref.hwnd && info.name.empty() && info.value.empty()) {
+        InvalidateRect(ref.hwnd, nullptr, TRUE);
+        UpdateWindow(ref.hwnd);
         std::wstring painted = GetLastPaintedText(ref.hwnd);
         if (!painted.empty()) {
             info.value = painted;
