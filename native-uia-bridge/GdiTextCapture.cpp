@@ -6,6 +6,7 @@
 #include <mutex>
 #include <tlhelp32.h>
 #include <unordered_map>
+#include <vector>
 
 namespace UiaBridge {
 
@@ -76,6 +77,69 @@ std::wstring FixupMisencodedAnsiText(const std::wstring& text) {
 // chasing codepages any further.
 constexpr UINT kEtoGlyphIndex = 0x0010;
 
+// Confirmed (real-device diag): ETO_GLYPHINDEX IS set for these calls, so `text` really is glyph
+// indices. There's no built-in "glyph index -> character" API — GetGlyphIndicesW only goes the
+// other way (character -> glyph, for the currently-selected font) — so the map has to be built by
+// brute force: run every plausible character this app could be drawing (ASCII + Hebrew block +
+// Hebrew punctuation + niqud) through GetGlyphIndicesW against the same HDC/font the real call
+// used, and invert the result. Cached per HFONT so this only runs once per distinct font actually
+// seen, not on every captured string.
+std::vector<wchar_t> BuildCandidateChars() {
+    std::vector<wchar_t> chars;
+    for (wchar_t c = 0x0020; c <= 0x007E; ++c) { chars.push_back(c); }   // ASCII printable
+    for (wchar_t c = 0x05B0; c <= 0x05C7; ++c) { chars.push_back(c); }   // Hebrew niqud/points
+    for (wchar_t c = 0x05D0; c <= 0x05EA; ++c) { chars.push_back(c); }   // Hebrew letters (Alef-Tav)
+    chars.push_back(0x05F3); chars.push_back(0x05F4);                    // Hebrew geresh/gershayim
+    chars.push_back(0x2018); chars.push_back(0x2019);                    // curly quotes (common in Hebrew UI)
+    chars.push_back(0x201C); chars.push_back(0x201D);
+    return chars;
+}
+
+std::mutex g_glyphMapMutex;
+std::unordered_map<HFONT, std::unordered_map<WORD, wchar_t>> g_glyphMaps;
+
+const std::unordered_map<WORD, wchar_t>* GetOrBuildGlyphMap(HDC hdc) {
+    HFONT font = static_cast<HFONT>(GetCurrentObject(hdc, OBJ_FONT));
+    if (!font) { return nullptr; }
+
+    {
+        std::lock_guard<std::mutex> lock(g_glyphMapMutex);
+        auto it = g_glyphMaps.find(font);
+        if (it != g_glyphMaps.end()) { return &it->second; }
+    }
+
+    static const std::vector<wchar_t> candidates = BuildCandidateChars();
+    std::unordered_map<WORD, wchar_t> map;
+    for (wchar_t ch : candidates) {
+        WORD glyph = 0xFFFF;
+        DWORD result = GetGlyphIndicesW(hdc, &ch, 1, &glyph, GGI_MARK_NONEXISTING_GLYPHS);
+        if (result != GDI_ERROR && glyph != 0xFFFF) {
+            map.emplace(glyph, ch); // first candidate wins a colliding glyph index — good enough for capture purposes
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(g_glyphMapMutex);
+    auto [it, inserted] = g_glyphMaps.emplace(font, std::move(map));
+    return &it->second;
+}
+
+// Best-effort decode of a captured glyph-index run back into characters, using the font actually
+// selected in `hdc` at call time. A glyph with no match in the candidate set becomes '?' rather
+// than silently dropped, so a partial/wrong-candidate-set decode is still visibly a decode, not
+// mistaken for a clean one.
+std::wstring DecodeGlyphIndices(HDC hdc, const wchar_t* glyphData, size_t count) {
+    const auto* map = GetOrBuildGlyphMap(hdc);
+    if (!map) { return L""; }
+    std::wstring result;
+    result.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        WORD glyph = static_cast<WORD>(glyphData[i]);
+        auto it = map->find(glyph);
+        result.push_back(it != map->end() ? it->second : L'?');
+    }
+    return result;
+}
+
 void LogHookFire(const wchar_t* fn, HDC hdc, UINT options, const std::wstring& text) {
     if (g_logCount.fetch_add(1) >= kMaxLoggedCalls) { return; }
     HWND hwnd = WindowFromDC(hdc);
@@ -126,12 +190,18 @@ void RecordPaintedTextW(const wchar_t* fnName, HDC hdc, LPCWSTR text, int count,
     size_t len = count >= 0 ? static_cast<size_t>(count) : wcsnlen_s(text, 8192);
     if (len == 0) { LogHookFire(fnName, hdc, options, L"<empty>"); return; }
     if (options & kEtoGlyphIndex) {
+        std::wstring decoded = DecodeGlyphIndices(hdc, text, len);
         wchar_t hexBuf[512] = {};
         size_t pos = 0;
         for (size_t i = 0; i < len && pos + 6 < ARRAYSIZE(hexBuf); ++i) {
             pos += swprintf_s(hexBuf + pos, ARRAYSIZE(hexBuf) - pos, L"%04X ", static_cast<unsigned short>(text[i]));
         }
-        LogHookFire(fnName, hdc, options, hexBuf);
+        if (!decoded.empty()) {
+            LogHookFire(fnName, hdc, options, decoded + L"  [glyphs: " + hexBuf + L"]");
+            RecordPaintedText(hdc, decoded);
+        } else {
+            LogHookFire(fnName, hdc, options, hexBuf);
+        }
         return;
     }
     std::wstring wide = FixupMisencodedAnsiText(std::wstring(text, len));
