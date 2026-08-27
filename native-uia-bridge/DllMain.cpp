@@ -95,6 +95,19 @@ DWORD WINAPI AttachWorker(LPVOID) {
         UiaBridge::DiagLog(L"FM20.DLL not loaded in this process — skipping GDI text-draw hook");
     }
 
+    // Also patch the host EXE's own import table, not just FM20.DLL's. The F3 Server 60000000
+    // controls never answer WM_GETOBJECT even for the window-frame object — something beyond
+    // FM20's own default handling owns/subclasses them — and the last real-device diag showed
+    // 0/4 GDI+ imports even present in FM20.DLL's table (not just unpatched — not there to find),
+    // meaning FM20 itself never calls GDI+ directly. The icon+gradient button painting is more
+    // likely implemented by the host app's own code calling GDI/GDI+ itself, which only shows up
+    // by patching its own IAT — FM20's table has no visibility into that.
+    HMODULE mainExe = GetModuleHandleW(nullptr);
+    if (mainExe && mainExe != fm20) {
+        bool hooked = UiaBridge::InstallGdiTextHooks(mainExe);
+        UiaBridge::DiagLog(L"InstallGdiTextHooks(main EXE) -> %s", hooked ? L"installed" : L"FAILED");
+    }
+
     // This is a bare CreateThread thread — no apartment is initialized on it by anything else in
     // the process. GetContainerAccessible's ObjectFromLresult call unmarshals a COM interface
     // pointer out of the WM_GETOBJECT reply, and per its own documentation requires
