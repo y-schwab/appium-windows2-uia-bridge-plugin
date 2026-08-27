@@ -30,6 +30,31 @@ std::unordered_map<void*, HWND> g_graphicsToHwnd;
 std::atomic<int> g_logCount{0};
 constexpr int kMaxLoggedCalls = 200;
 
+// A "wide" string captured via one of the *W hooks can still turn out to be legacy ANSI text that
+// got zero-extended into wchar_t one byte at a time instead of properly converted (confirmed via
+// real-device capture: DlgLibrary.dll's ExtTextOutW calls came through as Latin-1-range garbage —
+// every code point < 0x100 — for text known to actually be Hebrew). A genuine UTF-16 Hebrew string
+// would have code points in U+05D0..U+05EA; seeing everything stay under 0x100 is the tell that
+// each wchar_t is really just a raw single-byte codepage value (this machine's ANSI codepage,
+// CP1255/Windows-Hebrew for this app) in disguise. Reinterpreting is a safe no-op for genuinely
+// ASCII text (CP_ACP agrees with ASCII for 0..127), so this is applied unconditionally whenever
+// the heuristic matches rather than trying to special-case which hook/module needs it.
+std::wstring FixupMisencodedAnsiText(const std::wstring& text) {
+    if (text.empty()) { return text; }
+    for (wchar_t c : text) {
+        if (c > 0xFF) { return text; } // has real non-Latin-1 code points -> already correct Unicode
+    }
+    std::string bytes(text.size(), '\0');
+    for (size_t i = 0; i < text.size(); ++i) {
+        bytes[i] = static_cast<char>(text[i] & 0xFF);
+    }
+    int wlen = MultiByteToWideChar(CP_ACP, 0, bytes.data(), static_cast<int>(bytes.size()), nullptr, 0);
+    if (wlen <= 0) { return text; }
+    std::wstring fixed(static_cast<size_t>(wlen), L'\0');
+    MultiByteToWideChar(CP_ACP, 0, bytes.data(), static_cast<int>(bytes.size()), fixed.data(), wlen);
+    return fixed;
+}
+
 void LogHookFire(const wchar_t* fn, HDC hdc, const std::wstring& text) {
     if (g_logCount.fetch_add(1) >= kMaxLoggedCalls) { return; }
     HWND hwnd = WindowFromDC(hdc);
@@ -66,7 +91,7 @@ void RecordPaintedTextW(const wchar_t* fnName, HDC hdc, LPCWSTR text, int count)
     if (!text) { LogHookFire(fnName, hdc, L"<null>"); return; }
     size_t len = count >= 0 ? static_cast<size_t>(count) : wcsnlen_s(text, 8192);
     if (len == 0) { LogHookFire(fnName, hdc, L"<empty>"); return; }
-    std::wstring wide(text, len);
+    std::wstring wide = FixupMisencodedAnsiText(std::wstring(text, len));
     LogHookFire(fnName, hdc, wide);
     RecordPaintedText(hdc, wide);
 }
@@ -173,7 +198,7 @@ int WINAPI Hook_GdipDrawString(void* graphics, LPCWSTR string, int length, const
     }
     if (string) {
         size_t len = length >= 0 ? static_cast<size_t>(length) : wcsnlen_s(string, 8192);
-        std::wstring text(string, len);
+        std::wstring text = FixupMisencodedAnsiText(std::wstring(string, len));
         if (g_logCount.fetch_add(1) < kMaxLoggedCalls) {
             DiagLog(L"GdiTextCapture: GdipDrawString graphics=0x%p -> hwnd=0x%p text=\"%s\"", graphics, hwnd, text.c_str());
         }
