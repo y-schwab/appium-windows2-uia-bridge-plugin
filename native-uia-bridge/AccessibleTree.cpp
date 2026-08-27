@@ -312,6 +312,13 @@ AccessibleNodeInfo GetNodeInfo(const AccessibleRef& ref) {
         DiagLog(L"GetNodeInfo(0x%p): forced repaint (InvalidateRect=%d, UpdateWindow=%d) before GDI-capture fallback -> painted=\"%s\"",
             ref.hwnd, invalidated, updated, painted.c_str());
         if (!painted.empty()) {
+            // These captured strings are almost always button/label captions (that's what's
+            // actually painted for the F3 Server children) — UIA convention is that a caption is
+            // the control's Name, not its Value (Value pattern is for editable text, and real
+            // Win32 buttons don't implement it at all). Populate both: Name so Inspect's basic
+            // property list, screen readers, and Appium's own name/text lookups all see it
+            // immediately; Value too, since it costs nothing and some callers check there instead.
+            info.name = painted;
             info.value = painted;
         }
     }

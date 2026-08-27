@@ -99,6 +99,13 @@ HRESULT STDMETHODCALLTYPE ProviderElement::GetPropertyValue(PROPERTYID propertyI
             pRetVal->vt = VT_BSTR;
             pRetVal->bstrVal = SysAllocString(info.automationId.c_str());
             break;
+        case UIA_ValueValuePropertyId:
+            // The Value *pattern*'s get_Value (below) already returns this — but some clients
+            // (Inspect's flat property list among them) read the raw property instead of going
+            // through the pattern interface, and that path had no case here at all previously.
+            pRetVal->vt = VT_BSTR;
+            pRetVal->bstrVal = SysAllocString(info.value.c_str());
+            break;
         case UIA_HelpTextPropertyId:
             pRetVal->vt = VT_BSTR;
             pRetVal->bstrVal = SysAllocString(info.helpText.c_str());
