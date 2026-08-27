@@ -6,9 +6,10 @@ build/
 # Ignore package-lock.json in favour of npm-shrinkwrap.json for npm publishing
 package-lock.json*
 
-# Native C++ build output — built at publish time, not committed. Final DLL/injector land in
-# native/win-x64/ (and win-x86/ for 32-bit target processes).
-native/
+# Native C++ build output — TEMPORARILY committed during active dev (see native/win-x64/,
+# native/win-x86/) so it can be pulled directly instead of hand-delivered each iteration. Re-add
+# `native/` here (and git-rm the tracked binaries) once this round of native-side work settles —
+# see NEXT_STEPS.md.
 
 # MSBuild's default IntDir nests under a project-name subfolder, same layout quirk as
 # appium-desktop-driver's dotnet-bridge-agent/ — see native-uia-bridge/build.bat.

@@ -41,6 +41,26 @@ element bounds and click/type-by-rect interaction. This is where we land if Path
 capture turns out unreliable/inconsistent but partial capture is still better than
 nothing.
 
+## Path 1 progress log
+
+- GDI text-draw hooking confirmed working: `DlgLibrary.dll` (a custom BCCLTD UI-helper
+  DLL, not FM20.DLL or the main EXE) is what actually calls `ExtTextOutW` for the F3
+  Server button captions — found by broadening the IAT patch to every loaded module
+  (`InstallGdiTextHooksEverywhere`), not just FM20.DLL/the main EXE.
+- Captured text currently comes through garbled (Latin-1-range code points, not real
+  Hebrew) — ruled out codepage mismatch (CP1255 vs CP_ACP/1252 share the same 0x80-0x9F
+  mapping, so that wasn't it). Live theory: `ETO_GLYPHINDEX` — the "text" may be raw
+  glyph indices, not characters, if DlgLibrary.dll precomputed/shaped the Hebrew run.
+  Now logging the `options` flag on every `ExtTextOut*` call to confirm.
+- **TODO once this resolves**: narrow `InstallGdiTextHooksEverywhere()` back down to
+  just the module(s) that actually produce usable text (almost certainly
+  `DlgLibrary.dll` alone) — the current everywhere-patch was necessary to *find* that,
+  not to keep running long-term.
+- **TODO once native-side work settles**: re-add `native/` to `.gitignore` and
+  `git rm` the tracked `native/win-x64/`, `native/win-x86/` build output — currently
+  committed on request so builds can be pulled directly instead of hand-delivered each
+  iteration; not meant to stay tracked long-term.
+
 ## Removed this session (dead ends, ripped out to keep the codebase honest)
 
 - `OleControlTree.h/.cpp` and all `AccessibleRef::oleControl` plumbing in
