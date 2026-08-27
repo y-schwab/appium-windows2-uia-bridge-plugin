@@ -21,6 +21,15 @@ namespace UiaBridge {
 // matching import was found to patch (e.g. the module doesn't import any of these directly).
 bool InstallGdiTextHooks(HMODULE targetModule);
 
+// Calls InstallGdiTextHooks against every module currently loaded in this process (via
+// Toolhelp32Snapshot), not just a caller-guessed one. Neither FM20.DLL nor the main EXE's own
+// import table had a GdipDrawString entry to patch (see NEXT_STEPS.md / the diag logs that led
+// here) — the actual paint calls plausibly live in a third module (e.g. a custom UI helper DLL
+// the host app loads), which there's no reliable way to guess up front. Cheap and safe to run
+// broadly: patching a module that doesn't import any of these functions is a harmless no-op.
+// Returns the number of modules where at least one import was actually patched.
+int InstallGdiTextHooksEverywhere();
+
 // Returns the most recently captured painted text for `hwnd`, or empty if nothing has been
 // captured for it yet (hook never installed, hwnd never painted through a hooked call, or the
 // paint targeted an offscreen/memory DC that WindowFromDC couldn't attribute to any hwnd).

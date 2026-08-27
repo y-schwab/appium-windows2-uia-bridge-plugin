@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstring>
 #include <mutex>
+#include <tlhelp32.h>
 #include <unordered_map>
 
 namespace UiaBridge {
@@ -262,8 +263,43 @@ bool InstallGdiTextHooks(HMODULE targetModule) {
         }
     }
 
-    DiagLog(L"InstallGdiTextHooks: %d/%zu import(s) patched", patched, ARRAYSIZE(specs));
+    // Only log the summary when this module actually had something — InstallGdiTextHooksEverywhere
+    // calls this against every loaded module, most of which import none of these, and a "0/12"
+    // line per module would drown the log in noise for no signal.
+    if (patched > 0) {
+        DiagLog(L"InstallGdiTextHooks: %d/%zu import(s) patched", patched, ARRAYSIZE(specs));
+    }
     return patched > 0;
+}
+
+int InstallGdiTextHooksEverywhere() {
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        DiagLog(L"InstallGdiTextHooksEverywhere: CreateToolhelp32Snapshot failed (error %lu)", GetLastError());
+        return 0;
+    }
+
+    HMODULE self = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(&InstallGdiTextHooksEverywhere), &self);
+
+    int modulesPatched = 0;
+    MODULEENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    if (Module32FirstW(snapshot, &entry)) {
+        do {
+            if (entry.hModule == self) { continue; } // no reason to patch our own DLL's imports
+            if (InstallGdiTextHooks(entry.hModule)) {
+                ++modulesPatched;
+                DiagLog(L"InstallGdiTextHooksEverywhere: %s had at least one matching import", entry.szModule);
+            }
+        } while (Module32NextW(snapshot, &entry));
+    } else {
+        DiagLog(L"InstallGdiTextHooksEverywhere: Module32FirstW failed (error %lu)", GetLastError());
+    }
+    CloseHandle(snapshot);
+
+    DiagLog(L"InstallGdiTextHooksEverywhere: %d module(s) had a matching import patched", modulesPatched);
+    return modulesPatched;
 }
 
 std::wstring GetLastPaintedText(HWND hwnd) {

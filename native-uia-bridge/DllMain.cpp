@@ -87,26 +87,16 @@ DWORD WINAPI AttachWorker(LPVOID) {
     // control's hwnd, regardless of what (broken) accessibility plumbing sits behind it. Installed
     // early/unconditionally, independent of which hwnd attach ends up targeting — paints can start
     // arriving before InstallSubclass even runs.
-    HMODULE fm20 = GetModuleHandleW(L"FM20.DLL");
-    if (fm20) {
-        bool hooked = UiaBridge::InstallGdiTextHooks(fm20);
-        UiaBridge::DiagLog(L"InstallGdiTextHooks(FM20.DLL) -> %s", hooked ? L"installed" : L"FAILED");
-    } else {
-        UiaBridge::DiagLog(L"FM20.DLL not loaded in this process — skipping GDI text-draw hook");
-    }
-
-    // Also patch the host EXE's own import table, not just FM20.DLL's. The F3 Server 60000000
-    // controls never answer WM_GETOBJECT even for the window-frame object — something beyond
-    // FM20's own default handling owns/subclasses them — and the last real-device diag showed
-    // 0/4 GDI+ imports even present in FM20.DLL's table (not just unpatched — not there to find),
-    // meaning FM20 itself never calls GDI+ directly. The icon+gradient button painting is more
-    // likely implemented by the host app's own code calling GDI/GDI+ itself, which only shows up
-    // by patching its own IAT — FM20's table has no visibility into that.
-    HMODULE mainExe = GetModuleHandleW(nullptr);
-    if (mainExe && mainExe != fm20) {
-        bool hooked = UiaBridge::InstallGdiTextHooks(mainExe);
-        UiaBridge::DiagLog(L"InstallGdiTextHooks(main EXE) -> %s", hooked ? L"installed" : L"FAILED");
-    }
+    // Patching only FM20.DLL's own import table, then only FM20.DLL + the main EXE's, both proved
+    // insufficient in turn (see NEXT_STEPS.md / the diag logs that led here): FM20.DLL never calls
+    // GDI+ directly, and while the main EXE does create/destroy GDI+ Graphics objects
+    // (GdipCreateFromHDC/GdipDeleteGraphics found there), GdipDrawString itself was in neither
+    // module's table — the actual text-drawing call lives somewhere else, plausibly a custom UI
+    // helper DLL the host app loads (e.g. DlgLibrary.dll). Rather than keep guessing module by
+    // module, patch every loaded module's import table — cheap and safe, since a module that
+    // doesn't import any of these functions is an untouched no-op.
+    int modulesPatched = UiaBridge::InstallGdiTextHooksEverywhere();
+    UiaBridge::DiagLog(L"InstallGdiTextHooksEverywhere -> %d module(s) patched", modulesPatched);
 
     // This is a bare CreateThread thread — no apartment is initialized on it by anything else in
     // the process. GetContainerAccessible's ObjectFromLresult call unmarshals a COM interface
