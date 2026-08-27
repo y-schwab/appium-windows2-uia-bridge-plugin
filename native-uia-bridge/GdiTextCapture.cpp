@@ -1,6 +1,7 @@
 #include "GdiTextCapture.h"
 #include "Diagnostics.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <mutex>
@@ -137,6 +138,13 @@ std::wstring DecodeGlyphIndices(HDC hdc, const wchar_t* glyphData, size_t count)
         auto it = map->find(glyph);
         result.push_back(it != map->end() ? it->second : L'?');
     }
+    // Confirmed via real-device diag: the glyph run comes out in *visual* order (left-to-right on
+    // screen), not *logical* (reading) order — a straightforward per-glyph decode of an RTL Hebrew
+    // caption came back mirrored (e.g. "האיצי" for what's actually "יציאה"/Exit). Every captured
+    // caption in this app is pure Hebrew (no embedded LTR runs like numbers observed so far), so a
+    // flat reversal is correct here; a mixed-direction line would need real BiDi-run handling
+    // instead of this, but that's not what this app's controls are producing.
+    std::reverse(result.begin(), result.end());
     return result;
 }
 
