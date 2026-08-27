@@ -68,10 +68,19 @@ std::wstring FixupMisencodedAnsiText(const std::wstring& text) {
     return fixed;
 }
 
-void LogHookFire(const wchar_t* fn, HDC hdc, const std::wstring& text) {
+// ETO_GLYPHINDEX (0x0010, wingdi.h): when set on an ExtTextOut* call, `text` isn't characters at
+// all — it's raw glyph indices into the currently-selected font, an optimization apps use to skip
+// character-to-glyph mapping (common for precomputed/shaped complex-script runs, which Hebrew is).
+// If that's what's happening here, no codepage reinterpretation of the "text" will ever produce
+// real characters, because it was never character data to begin with — decisive to know before
+// chasing codepages any further.
+constexpr UINT kEtoGlyphIndex = 0x0010;
+
+void LogHookFire(const wchar_t* fn, HDC hdc, UINT options, const std::wstring& text) {
     if (g_logCount.fetch_add(1) >= kMaxLoggedCalls) { return; }
     HWND hwnd = WindowFromDC(hdc);
-    DiagLog(L"GdiTextCapture: %s hdc=0x%p -> WindowFromDC=0x%p text=\"%s\"", fn, hdc, hwnd, text.c_str());
+    DiagLog(L"GdiTextCapture: %s hdc=0x%p options=0x%X%s -> WindowFromDC=0x%p text=\"%s\"",
+        fn, hdc, options, (options & kEtoGlyphIndex) ? L" (ETO_GLYPHINDEX!)" : L"", hwnd, text.c_str());
 }
 
 void RecordPaintedTextForHwnd(HWND hwnd, const std::wstring& text) {
@@ -88,25 +97,45 @@ void RecordPaintedText(HDC hdc, const std::wstring& text) {
     RecordPaintedTextForHwnd(WindowFromDC(hdc), text);
 }
 
-void RecordPaintedTextA(const wchar_t* fnName, HDC hdc, LPCSTR text, int count) {
-    if (!text) { LogHookFire(fnName, hdc, L"<null>"); return; }
+void RecordPaintedTextA(const wchar_t* fnName, HDC hdc, LPCSTR text, int count, UINT options = 0) {
+    if (!text) { LogHookFire(fnName, hdc, options, L"<null>"); return; }
     int len = count >= 0 ? count : static_cast<int>(strnlen_s(text, 8192));
-    if (len <= 0) { LogHookFire(fnName, hdc, L"<empty>"); return; }
+    if (len <= 0) { LogHookFire(fnName, hdc, options, L"<empty>"); return; }
+    if (options & kEtoGlyphIndex) {
+        // Not real character data — logging it as hex is more honest than pretending a codepage
+        // conversion means anything here.
+        wchar_t hexBuf[512] = {};
+        size_t pos = 0;
+        for (int i = 0; i < len && pos + 3 < ARRAYSIZE(hexBuf); ++i) {
+            pos += swprintf_s(hexBuf + pos, ARRAYSIZE(hexBuf) - pos, L"%02X ", static_cast<unsigned char>(text[i]));
+        }
+        LogHookFire(fnName, hdc, options, hexBuf);
+        return;
+    }
     UINT cp = HebrewCodePage(); // the *A hooks' text is this app's own ANSI (Hebrew) data, not necessarily CP_ACP — see HebrewCodePage's comment
     int wlen = MultiByteToWideChar(cp, 0, text, len, nullptr, 0);
-    if (wlen <= 0) { LogHookFire(fnName, hdc, L"<empty>"); return; }
+    if (wlen <= 0) { LogHookFire(fnName, hdc, options, L"<empty>"); return; }
     std::wstring wide(static_cast<size_t>(wlen), L'\0');
     MultiByteToWideChar(cp, 0, text, len, wide.data(), wlen);
-    LogHookFire(fnName, hdc, wide);
+    LogHookFire(fnName, hdc, options, wide);
     RecordPaintedText(hdc, wide);
 }
 
-void RecordPaintedTextW(const wchar_t* fnName, HDC hdc, LPCWSTR text, int count) {
-    if (!text) { LogHookFire(fnName, hdc, L"<null>"); return; }
+void RecordPaintedTextW(const wchar_t* fnName, HDC hdc, LPCWSTR text, int count, UINT options = 0) {
+    if (!text) { LogHookFire(fnName, hdc, options, L"<null>"); return; }
     size_t len = count >= 0 ? static_cast<size_t>(count) : wcsnlen_s(text, 8192);
-    if (len == 0) { LogHookFire(fnName, hdc, L"<empty>"); return; }
+    if (len == 0) { LogHookFire(fnName, hdc, options, L"<empty>"); return; }
+    if (options & kEtoGlyphIndex) {
+        wchar_t hexBuf[512] = {};
+        size_t pos = 0;
+        for (size_t i = 0; i < len && pos + 6 < ARRAYSIZE(hexBuf); ++i) {
+            pos += swprintf_s(hexBuf + pos, ARRAYSIZE(hexBuf) - pos, L"%04X ", static_cast<unsigned short>(text[i]));
+        }
+        LogHookFire(fnName, hdc, options, hexBuf);
+        return;
+    }
     std::wstring wide = FixupMisencodedAnsiText(std::wstring(text, len));
-    LogHookFire(fnName, hdc, wide);
+    LogHookFire(fnName, hdc, options, wide);
     RecordPaintedText(hdc, wide);
 }
 
@@ -155,11 +184,11 @@ BOOL WINAPI Hook_TextOutW(HDC hdc, int x, int y, LPCWSTR text, int count) {
     return g_origTextOutW(hdc, x, y, text, count);
 }
 BOOL WINAPI Hook_ExtTextOutA(HDC hdc, int x, int y, UINT options, const RECT* lprc, LPCSTR text, UINT count, const INT* dx) {
-    RecordPaintedTextA(L"ExtTextOutA", hdc, text, static_cast<int>(count));
+    RecordPaintedTextA(L"ExtTextOutA", hdc, text, static_cast<int>(count), options);
     return g_origExtTextOutA(hdc, x, y, options, lprc, text, count, dx);
 }
 BOOL WINAPI Hook_ExtTextOutW(HDC hdc, int x, int y, UINT options, const RECT* lprc, LPCWSTR text, UINT count, const INT* dx) {
-    RecordPaintedTextW(L"ExtTextOutW", hdc, text, static_cast<int>(count));
+    RecordPaintedTextW(L"ExtTextOutW", hdc, text, static_cast<int>(count), options);
     return g_origExtTextOutW(hdc, x, y, options, lprc, text, count, dx);
 }
 int WINAPI Hook_DrawTextA(HDC hdc, LPCSTR text, int count, LPRECT lprc, UINT format) {
