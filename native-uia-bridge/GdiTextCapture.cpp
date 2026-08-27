@@ -1,6 +1,7 @@
 #include "GdiTextCapture.h"
 #include "Diagnostics.h"
 
+#include <atomic>
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
@@ -12,34 +13,50 @@ namespace {
 std::mutex g_mutex;
 std::unordered_map<HWND, std::wstring> g_paintedText;
 
+// Every hooked call gets logged, unconditionally, whether or not it yields anything usable — this
+// is the decisive answer to "are the hooks even firing, and does WindowFromDC resolve" instead of
+// continuing to guess from an empty result. Capped so a long-running attach (hooks stay installed
+// for the process's whole lifetime, not just the diagnostic dump at attach time) can't run the log
+// file away — plenty to diagnose one attach's worth of repaint activity.
+std::atomic<int> g_logCount{0};
+constexpr int kMaxLoggedCalls = 200;
+
+void LogHookFire(const wchar_t* fn, HDC hdc, const std::wstring& text) {
+    if (g_logCount.fetch_add(1) >= kMaxLoggedCalls) { return; }
+    HWND hwnd = WindowFromDC(hdc);
+    DiagLog(L"GdiTextCapture: %s hdc=0x%p -> WindowFromDC=0x%p text=\"%s\"", fn, hdc, hwnd, text.c_str());
+}
+
 void RecordPaintedText(HDC hdc, const std::wstring& text) {
-    if (text.empty()) { return; }
     // WindowFromDC only resolves for a DC actually tied to a window (a DC obtained via GetDC/
     // GetWindowDC/BeginPaint) — memory/offscreen DCs (e.g. double-buffering) return null here and
     // are silently dropped. FM20 controls in this app are painted directly (confirmed: they have
     // their own real hwnd each, per the diag logs), so this is expected to resolve for them.
     HWND hwnd = WindowFromDC(hdc);
-    if (!hwnd) { return; }
+    if (!hwnd || text.empty()) { return; }
     std::lock_guard<std::mutex> lock(g_mutex);
     g_paintedText[hwnd] = text;
 }
 
-void RecordPaintedTextA(HDC hdc, LPCSTR text, int count) {
-    if (!text) { return; }
+void RecordPaintedTextA(const wchar_t* fnName, HDC hdc, LPCSTR text, int count) {
+    if (!text) { LogHookFire(fnName, hdc, L"<null>"); return; }
     int len = count >= 0 ? count : static_cast<int>(strnlen_s(text, 8192));
-    if (len <= 0) { return; }
+    if (len <= 0) { LogHookFire(fnName, hdc, L"<empty>"); return; }
     int wlen = MultiByteToWideChar(CP_ACP, 0, text, len, nullptr, 0);
-    if (wlen <= 0) { return; }
+    if (wlen <= 0) { LogHookFire(fnName, hdc, L"<empty>"); return; }
     std::wstring wide(static_cast<size_t>(wlen), L'\0');
     MultiByteToWideChar(CP_ACP, 0, text, len, wide.data(), wlen);
+    LogHookFire(fnName, hdc, wide);
     RecordPaintedText(hdc, wide);
 }
 
-void RecordPaintedTextW(HDC hdc, LPCWSTR text, int count) {
-    if (!text) { return; }
+void RecordPaintedTextW(const wchar_t* fnName, HDC hdc, LPCWSTR text, int count) {
+    if (!text) { LogHookFire(fnName, hdc, L"<null>"); return; }
     size_t len = count >= 0 ? static_cast<size_t>(count) : wcsnlen_s(text, 8192);
-    if (len == 0) { return; }
-    RecordPaintedText(hdc, std::wstring(text, len));
+    if (len == 0) { LogHookFire(fnName, hdc, L"<empty>"); return; }
+    std::wstring wide(text, len);
+    LogHookFire(fnName, hdc, wide);
+    RecordPaintedText(hdc, wide);
 }
 
 // ---- Original function pointers, filled in by InstallGdiTextHooks ----
@@ -65,35 +82,35 @@ DrawTextExW_t g_origDrawTextExW = nullptr;
 // ---- Hook trampolines: capture, then always call through to the real implementation ----
 
 BOOL WINAPI Hook_TextOutA(HDC hdc, int x, int y, LPCSTR text, int count) {
-    RecordPaintedTextA(hdc, text, count);
+    RecordPaintedTextA(L"TextOutA", hdc, text, count);
     return g_origTextOutA(hdc, x, y, text, count);
 }
 BOOL WINAPI Hook_TextOutW(HDC hdc, int x, int y, LPCWSTR text, int count) {
-    RecordPaintedTextW(hdc, text, count);
+    RecordPaintedTextW(L"TextOutW", hdc, text, count);
     return g_origTextOutW(hdc, x, y, text, count);
 }
 BOOL WINAPI Hook_ExtTextOutA(HDC hdc, int x, int y, UINT options, const RECT* lprc, LPCSTR text, UINT count, const INT* dx) {
-    RecordPaintedTextA(hdc, text, static_cast<int>(count));
+    RecordPaintedTextA(L"ExtTextOutA", hdc, text, static_cast<int>(count));
     return g_origExtTextOutA(hdc, x, y, options, lprc, text, count, dx);
 }
 BOOL WINAPI Hook_ExtTextOutW(HDC hdc, int x, int y, UINT options, const RECT* lprc, LPCWSTR text, UINT count, const INT* dx) {
-    RecordPaintedTextW(hdc, text, static_cast<int>(count));
+    RecordPaintedTextW(L"ExtTextOutW", hdc, text, static_cast<int>(count));
     return g_origExtTextOutW(hdc, x, y, options, lprc, text, count, dx);
 }
 int WINAPI Hook_DrawTextA(HDC hdc, LPCSTR text, int count, LPRECT lprc, UINT format) {
-    RecordPaintedTextA(hdc, text, count);
+    RecordPaintedTextA(L"DrawTextA", hdc, text, count);
     return g_origDrawTextA(hdc, text, count, lprc, format);
 }
 int WINAPI Hook_DrawTextW(HDC hdc, LPCWSTR text, int count, LPRECT lprc, UINT format) {
-    RecordPaintedTextW(hdc, text, count);
+    RecordPaintedTextW(L"DrawTextW", hdc, text, count);
     return g_origDrawTextW(hdc, text, count, lprc, format);
 }
 int WINAPI Hook_DrawTextExA(HDC hdc, LPSTR text, int count, LPRECT lprc, UINT format, LPDRAWTEXTPARAMS dtp) {
-    RecordPaintedTextA(hdc, text, count);
+    RecordPaintedTextA(L"DrawTextExA", hdc, text, count);
     return g_origDrawTextExA(hdc, text, count, lprc, format, dtp);
 }
 int WINAPI Hook_DrawTextExW(HDC hdc, LPWSTR text, int count, LPRECT lprc, UINT format, LPDRAWTEXTPARAMS dtp) {
-    RecordPaintedTextW(hdc, text, count);
+    RecordPaintedTextW(L"DrawTextExW", hdc, text, count);
     return g_origDrawTextExW(hdc, text, count, lprc, format, dtp);
 }
 

@@ -306,9 +306,11 @@ AccessibleNodeInfo GetNodeInfo(const AccessibleRef& ref) {
     // blocking semantics WM_GETOBJECT already relies on elsewhere in this codebase) — synchronous,
     // so the hooked GDI calls have already run by the time UpdateWindow returns.
     if (ref.hwnd && info.name.empty() && info.value.empty()) {
-        InvalidateRect(ref.hwnd, nullptr, TRUE);
-        UpdateWindow(ref.hwnd);
+        BOOL invalidated = InvalidateRect(ref.hwnd, nullptr, TRUE);
+        BOOL updated = UpdateWindow(ref.hwnd);
         std::wstring painted = GetLastPaintedText(ref.hwnd);
+        DiagLog(L"GetNodeInfo(0x%p): forced repaint (InvalidateRect=%d, UpdateWindow=%d) before GDI-capture fallback -> painted=\"%s\"",
+            ref.hwnd, invalidated, updated, painted.c_str());
         if (!painted.empty()) {
             info.value = painted;
         }
