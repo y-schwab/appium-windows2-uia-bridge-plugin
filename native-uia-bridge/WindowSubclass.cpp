@@ -159,6 +159,27 @@ bool InstallSubclass(HWND hwnd, std::wstring* outError) {
     }
 
     DiagLog(L"InstallSubclass(0x%p): subclass installed successfully", hwnd);
+
+    // Recurse onto every discovered child that's backed by its own real hwnd (e.g. each F3 Server
+    // 60000000 button) — NOT optional polish. Confirmed via real-device Inspect.exe capture: a
+    // child hwnd's own WM_GETOBJECT is untouched by subclassing only the root, so any hwnd-first
+    // lookup (mouse-hover hit-test in Inspect, a NativeWindowHandle-based lookup, or UI Automation
+    // Core's own hwnd-boundary re-hosting) queries that hwnd directly and gets the OS's generic
+    // MSAA proxy instead of our provider — confirmed by Inspect's own ProviderDescription reading
+    // "Main: Microsoft: MSAA Proxy", not our DLL. Standard UIA multi-hwnd embedding: each hwnd that
+    // hosts real content must independently answer WM_GETOBJECT with its own fragment root;
+    // get_HostRawElementProvider (ProviderRoot.cpp) + UiaHostProviderFromHwnd already stitch these
+    // back into one coherent tree across hwnd boundaries, so no extra plumbing is needed beyond
+    // making sure every such hwnd is actually subclassed. Recursive so a grandchild hwnd (should
+    // this app ever have one) gets covered too; already-subclassed hwnds are a no-op via the guard
+    // at the top of this function.
+    for (auto& child : GetChildren(rootRef)) {
+        if (child.hwnd && child.hwnd != hwnd) {
+            std::wstring childError;
+            InstallSubclass(child.hwnd, &childError); // failure is non-fatal — just one fewer hwnd with a working provider, logged either way
+        }
+    }
+
     return true;
 }
 

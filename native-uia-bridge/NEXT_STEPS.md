@@ -52,6 +52,24 @@ nothing.
   mapping, so that wasn't it). Live theory: `ETO_GLYPHINDEX` — the "text" may be raw
   glyph indices, not characters, if DlgLibrary.dll precomputed/shaped the Hebrew run.
   Now logging the `options` flag on every `ExtTextOut*` call to confirm.
+- **RESOLVED**: `options & ETO_GLYPHINDEX` confirmed set — the captured "text" was raw
+  glyph indices (shaped by Uniscribe for RTL Hebrew), never character data, which is
+  why no codepage guess ever worked. Fixed via a brute-force `GetGlyphIndicesW`
+  reverse lookup (character → glyph → invert, cached per `HFONT`), plus a flat
+  `std::reverse` since RTL glyph runs come out in visual, not logical, order. Every
+  captured caption now matches the app's real button text exactly.
+- **RESOLVED**: captured/decoded text populated `Name`/`Value` on our `ProviderElement`
+  correctly, but Inspect.exe (mouse-hover hit-test) and `getPageSource()` still showed
+  it empty — root cause confirmed via Inspect's own `ProviderDescription`
+  (`Main: Microsoft: MSAA Proxy`, not our DLL): only the root dialog hwnd was
+  subclassed, so any hwnd-first lookup (point hit-test, `NativeWindowHandle`-based
+  resolution, or UI Automation Core's own hwnd-boundary re-hosting) queried a child
+  hwnd's own untouched `WM_GETOBJECT` directly and got the OS's generic proxy instead
+  of our provider — bypassing the `Navigate(FirstChild)` tree entirely. Fixed:
+  `InstallSubclass` now recurses onto every discovered child hwnd too, each becoming
+  its own mini fragment root (standard UIA multi-hwnd embedding pattern;
+  `get_HostRawElementProvider`/`UiaHostProviderFromHwnd` stitches them back together
+  automatically).
 - **TODO once this resolves**: narrow `InstallGdiTextHooksEverywhere()` back down to
   just the module(s) that actually produce usable text (almost certainly
   `DlgLibrary.dll` alone) — the current everywhere-patch was necessary to *find* that,
