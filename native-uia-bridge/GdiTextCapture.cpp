@@ -30,15 +30,27 @@ std::unordered_map<void*, HWND> g_graphicsToHwnd;
 std::atomic<int> g_logCount{0};
 constexpr int kMaxLoggedCalls = 200;
 
+// The app's own text is Hebrew (CP1255/Windows-Hebrew) regardless of what ANSI codepage the
+// machine this DLL happens to run on is set to — CP_ACP was tried first and produced visibly
+// wrong output (e.g. byte 0x99 came back as U+2122 "™", CP1252's mapping for that byte; CP1255
+// maps the same byte to an actual Hebrew letter), confirming the target machine's CP_ACP is 1252
+// (English), not 1255, even though this app's internal text data is Hebrew-encoded regardless.
+// Hardcoding 1255 instead of trusting CP_ACP fixes that mismatch; IsValidCodePage guards the rare
+// machine without Hebrew codepage support installed, falling back to CP_ACP rather than failing.
+UINT HebrewCodePage() {
+    static const UINT cp = IsValidCodePage(1255) ? 1255 : CP_ACP;
+    return cp;
+}
+
 // A "wide" string captured via one of the *W hooks can still turn out to be legacy ANSI text that
 // got zero-extended into wchar_t one byte at a time instead of properly converted (confirmed via
 // real-device capture: DlgLibrary.dll's ExtTextOutW calls came through as Latin-1-range garbage —
 // every code point < 0x100 — for text known to actually be Hebrew). A genuine UTF-16 Hebrew string
 // would have code points in U+05D0..U+05EA; seeing everything stay under 0x100 is the tell that
-// each wchar_t is really just a raw single-byte codepage value (this machine's ANSI codepage,
-// CP1255/Windows-Hebrew for this app) in disguise. Reinterpreting is a safe no-op for genuinely
-// ASCII text (CP_ACP agrees with ASCII for 0..127), so this is applied unconditionally whenever
-// the heuristic matches rather than trying to special-case which hook/module needs it.
+// each wchar_t is really just a raw single-byte codepage value (CP1255/Windows-Hebrew for this
+// app) in disguise. Reinterpreting is a safe no-op for genuinely ASCII text (CP1255 agrees with
+// ASCII for 0..127, same as every single-byte Windows codepage), so this is applied
+// unconditionally whenever the heuristic matches rather than special-casing which hook needs it.
 std::wstring FixupMisencodedAnsiText(const std::wstring& text) {
     if (text.empty()) { return text; }
     for (wchar_t c : text) {
@@ -48,10 +60,11 @@ std::wstring FixupMisencodedAnsiText(const std::wstring& text) {
     for (size_t i = 0; i < text.size(); ++i) {
         bytes[i] = static_cast<char>(text[i] & 0xFF);
     }
-    int wlen = MultiByteToWideChar(CP_ACP, 0, bytes.data(), static_cast<int>(bytes.size()), nullptr, 0);
+    UINT cp = HebrewCodePage();
+    int wlen = MultiByteToWideChar(cp, 0, bytes.data(), static_cast<int>(bytes.size()), nullptr, 0);
     if (wlen <= 0) { return text; }
     std::wstring fixed(static_cast<size_t>(wlen), L'\0');
-    MultiByteToWideChar(CP_ACP, 0, bytes.data(), static_cast<int>(bytes.size()), fixed.data(), wlen);
+    MultiByteToWideChar(cp, 0, bytes.data(), static_cast<int>(bytes.size()), fixed.data(), wlen);
     return fixed;
 }
 
@@ -79,10 +92,11 @@ void RecordPaintedTextA(const wchar_t* fnName, HDC hdc, LPCSTR text, int count) 
     if (!text) { LogHookFire(fnName, hdc, L"<null>"); return; }
     int len = count >= 0 ? count : static_cast<int>(strnlen_s(text, 8192));
     if (len <= 0) { LogHookFire(fnName, hdc, L"<empty>"); return; }
-    int wlen = MultiByteToWideChar(CP_ACP, 0, text, len, nullptr, 0);
+    UINT cp = HebrewCodePage(); // the *A hooks' text is this app's own ANSI (Hebrew) data, not necessarily CP_ACP — see HebrewCodePage's comment
+    int wlen = MultiByteToWideChar(cp, 0, text, len, nullptr, 0);
     if (wlen <= 0) { LogHookFire(fnName, hdc, L"<empty>"); return; }
     std::wstring wide(static_cast<size_t>(wlen), L'\0');
-    MultiByteToWideChar(CP_ACP, 0, text, len, wide.data(), wlen);
+    MultiByteToWideChar(cp, 0, text, len, wide.data(), wlen);
     LogHookFire(fnName, hdc, wide);
     RecordPaintedText(hdc, wide);
 }
