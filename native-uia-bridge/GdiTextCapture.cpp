@@ -13,6 +13,14 @@ namespace {
 std::mutex g_mutex;
 std::unordered_map<HWND, std::wstring> g_paintedText;
 
+// GDI+ (GdipDrawString, GDIPLUS.DLL) is a completely separate text-drawing API from classic GDI —
+// confirmed loaded in this process (see NEXT_STEPS.md's module dump), and the app's buttons have
+// the icon+gradient look typical of GDI+ rendering. A GpGraphics* carries no reference back to the
+// HDC/HWND it draws into, unlike an HDC (WindowFromDC), so it has to be tracked ourselves: hook
+// GdipCreateFromHDC/GdipCreateFromHWND to remember which hwnd each GpGraphics* belongs to, and
+// GdipDeleteGraphics to stop tracking it once freed.
+std::unordered_map<void*, HWND> g_graphicsToHwnd;
+
 // Every hooked call gets logged, unconditionally, whether or not it yields anything usable — this
 // is the decisive answer to "are the hooks even firing, and does WindowFromDC resolve" instead of
 // continuing to guess from an empty result. Capped so a long-running attach (hooks stay installed
@@ -27,15 +35,18 @@ void LogHookFire(const wchar_t* fn, HDC hdc, const std::wstring& text) {
     DiagLog(L"GdiTextCapture: %s hdc=0x%p -> WindowFromDC=0x%p text=\"%s\"", fn, hdc, hwnd, text.c_str());
 }
 
+void RecordPaintedTextForHwnd(HWND hwnd, const std::wstring& text) {
+    if (!hwnd || text.empty()) { return; }
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_paintedText[hwnd] = text;
+}
+
 void RecordPaintedText(HDC hdc, const std::wstring& text) {
     // WindowFromDC only resolves for a DC actually tied to a window (a DC obtained via GetDC/
     // GetWindowDC/BeginPaint) — memory/offscreen DCs (e.g. double-buffering) return null here and
     // are silently dropped. FM20 controls in this app are painted directly (confirmed: they have
     // their own real hwnd each, per the diag logs), so this is expected to resolve for them.
-    HWND hwnd = WindowFromDC(hdc);
-    if (!hwnd || text.empty()) { return; }
-    std::lock_guard<std::mutex> lock(g_mutex);
-    g_paintedText[hwnd] = text;
+    RecordPaintedTextForHwnd(WindowFromDC(hdc), text);
 }
 
 void RecordPaintedTextA(const wchar_t* fnName, HDC hdc, LPCSTR text, int count) {
@@ -79,6 +90,20 @@ DrawTextW_t g_origDrawTextW = nullptr;
 DrawTextExA_t g_origDrawTextExA = nullptr;
 DrawTextExW_t g_origDrawTextExW = nullptr;
 
+// GDI+ flat C API (gdiplusflat.h) — GpGraphics/GpFont/RectF/GpStringFormat/GpBrush are all opaque
+// from here, so every pointer parameter is declared void*; that's ABI-identical to the real
+// pointer types (only the pointee's type differs, not how it's passed), so this is safe without
+// pulling in the actual GDI+ headers. GpStatus is an int-sized enum (0 == Ok).
+using GdipCreateFromHDC_t = int(WINAPI*)(HDC, void**);
+using GdipCreateFromHWND_t = int(WINAPI*)(HWND, void**);
+using GdipDeleteGraphics_t = int(WINAPI*)(void*);
+using GdipDrawString_t = int(WINAPI*)(void*, LPCWSTR, int, const void*, const void*, const void*, const void*);
+
+GdipCreateFromHDC_t g_origGdipCreateFromHDC = nullptr;
+GdipCreateFromHWND_t g_origGdipCreateFromHWND = nullptr;
+GdipDeleteGraphics_t g_origGdipDeleteGraphics = nullptr;
+GdipDrawString_t g_origGdipDrawString = nullptr;
+
 // ---- Hook trampolines: capture, then always call through to the real implementation ----
 
 BOOL WINAPI Hook_TextOutA(HDC hdc, int x, int y, LPCSTR text, int count) {
@@ -112,6 +137,48 @@ int WINAPI Hook_DrawTextExA(HDC hdc, LPSTR text, int count, LPRECT lprc, UINT fo
 int WINAPI Hook_DrawTextExW(HDC hdc, LPWSTR text, int count, LPRECT lprc, UINT format, LPDRAWTEXTPARAMS dtp) {
     RecordPaintedTextW(L"DrawTextExW", hdc, text, count);
     return g_origDrawTextExW(hdc, text, count, lprc, format, dtp);
+}
+
+int WINAPI Hook_GdipCreateFromHDC(HDC hdc, void** graphics) {
+    int status = g_origGdipCreateFromHDC(hdc, graphics);
+    if (status == 0 && graphics && *graphics) {
+        HWND hwnd = WindowFromDC(hdc);
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_graphicsToHwnd[*graphics] = hwnd;
+    }
+    return status;
+}
+int WINAPI Hook_GdipCreateFromHWND(HWND hwnd, void** graphics) {
+    int status = g_origGdipCreateFromHWND(hwnd, graphics);
+    if (status == 0 && graphics && *graphics) {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_graphicsToHwnd[*graphics] = hwnd;
+    }
+    return status;
+}
+int WINAPI Hook_GdipDeleteGraphics(void* graphics) {
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_graphicsToHwnd.erase(graphics);
+    }
+    return g_origGdipDeleteGraphics(graphics);
+}
+int WINAPI Hook_GdipDrawString(void* graphics, LPCWSTR string, int length, const void* font, const void* layoutRect, const void* stringFormat, const void* brush) {
+    HWND hwnd = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_graphicsToHwnd.find(graphics);
+        if (it != g_graphicsToHwnd.end()) { hwnd = it->second; }
+    }
+    if (string) {
+        size_t len = length >= 0 ? static_cast<size_t>(length) : wcsnlen_s(string, 8192);
+        std::wstring text(string, len);
+        if (g_logCount.fetch_add(1) < kMaxLoggedCalls) {
+            DiagLog(L"GdiTextCapture: GdipDrawString graphics=0x%p -> hwnd=0x%p text=\"%s\"", graphics, hwnd, text.c_str());
+        }
+        RecordPaintedTextForHwnd(hwnd, text);
+    }
+    return g_origGdipDrawString(graphics, string, length, font, layoutRect, stringFormat, brush);
 }
 
 // Walks `module`'s own import descriptors (its IAT, not the exporting DLL's export table) looking
@@ -176,6 +243,13 @@ bool InstallGdiTextHooks(HMODULE targetModule) {
         { "DrawTextW",    reinterpret_cast<void*>(&Hook_DrawTextW),    reinterpret_cast<void**>(&g_origDrawTextW) },
         { "DrawTextExA",  reinterpret_cast<void*>(&Hook_DrawTextExA),  reinterpret_cast<void**>(&g_origDrawTextExA) },
         { "DrawTextExW",  reinterpret_cast<void*>(&Hook_DrawTextExW),  reinterpret_cast<void**>(&g_origDrawTextExW) },
+        // GDI+ (see the g_graphicsToHwnd comment above) — same IAT-patch mechanism, just against
+        // whichever import table entries FM20.DLL has for GDIPLUS.DLL's flat C API instead of
+        // gdi32's classic one.
+        { "GdipCreateFromHDC",  reinterpret_cast<void*>(&Hook_GdipCreateFromHDC),  reinterpret_cast<void**>(&g_origGdipCreateFromHDC) },
+        { "GdipCreateFromHWND", reinterpret_cast<void*>(&Hook_GdipCreateFromHWND), reinterpret_cast<void**>(&g_origGdipCreateFromHWND) },
+        { "GdipDeleteGraphics", reinterpret_cast<void*>(&Hook_GdipDeleteGraphics), reinterpret_cast<void**>(&g_origGdipDeleteGraphics) },
+        { "GdipDrawString",     reinterpret_cast<void*>(&Hook_GdipDrawString),     reinterpret_cast<void**>(&g_origGdipDrawString) },
     };
 
     int patched = 0;
