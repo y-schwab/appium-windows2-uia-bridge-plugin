@@ -32,28 +32,34 @@ std::unordered_map<void*, HWND> g_graphicsToHwnd;
 std::atomic<int> g_logCount{0};
 constexpr int kMaxLoggedCalls = 200;
 
-// The app's own text is Hebrew (CP1255/Windows-Hebrew) regardless of what ANSI codepage the
-// machine this DLL happens to run on is set to — CP_ACP was tried first and produced visibly
-// wrong output (e.g. byte 0x99 came back as U+2122 "™", CP1252's mapping for that byte; CP1255
-// maps the same byte to an actual Hebrew letter), confirming the target machine's CP_ACP is 1252
-// (English), not 1255, even though this app's internal text data is Hebrew-encoded regardless.
-// Hardcoding 1255 instead of trusting CP_ACP fixes that mismatch; IsValidCodePage guards the rare
-// machine without Hebrew codepage support installed, falling back to CP_ACP rather than failing.
-UINT HebrewCodePage() {
-    static const UINT cp = IsValidCodePage(1255) ? 1255 : CP_ACP;
-    return cp;
+// Tier 3 generalization: derive the codepage for a captured ANSI/zero-extended string from the
+// *actual font selected in this hdc*, via GetTextCharsetInfo, instead of a hardcoded script
+// (originally hardcoded to CP1255/Windows-Hebrew for the one app that motivated this codebase —
+// wrong for anything else, e.g. an Arabic or Cyrillic app would need CP1256/CP1251 instead). Best
+// effort throughout: any failure (charset lookup fails, reported codepage isn't installed) falls
+// back to CP_ACP rather than erroring, so a target this heuristic doesn't fit for just gets
+// whatever the classic (imperfect) behavior always was, never a crash or a dropped capture.
+UINT CodePageForHdc(HDC hdc) {
+    if (!hdc) { return CP_ACP; }
+    int charset = GetTextCharset(hdc);
+    if (charset == DEFAULT_CHARSET || charset == 0) { return CP_ACP; }
+    CHARSETINFO csi{};
+    if (TranslateCharsetInfo(reinterpret_cast<DWORD*>(static_cast<INT_PTR>(charset)), &csi, TCI_SRCCHARSET) && IsValidCodePage(csi.ciACP)) {
+        return csi.ciACP;
+    }
+    return CP_ACP;
 }
 
 // A "wide" string captured via one of the *W hooks can still turn out to be legacy ANSI text that
 // got zero-extended into wchar_t one byte at a time instead of properly converted (confirmed via
 // real-device capture: DlgLibrary.dll's ExtTextOutW calls came through as Latin-1-range garbage —
-// every code point < 0x100 — for text known to actually be Hebrew). A genuine UTF-16 Hebrew string
-// would have code points in U+05D0..U+05EA; seeing everything stay under 0x100 is the tell that
-// each wchar_t is really just a raw single-byte codepage value (CP1255/Windows-Hebrew for this
-// app) in disguise. Reinterpreting is a safe no-op for genuinely ASCII text (CP1255 agrees with
-// ASCII for 0..127, same as every single-byte Windows codepage), so this is applied
-// unconditionally whenever the heuristic matches rather than special-casing which hook needs it.
-std::wstring FixupMisencodedAnsiText(const std::wstring& text) {
+// every code point < 0x100 — for text known to actually be Hebrew). Seeing every code point stay
+// under 0x100 is the general tell (true for any single-byte-codepage script, not just Hebrew) that
+// each wchar_t is really just a raw codepage byte value in disguise. Reinterpreting via
+// CodePageForHdc is a safe no-op for genuinely ASCII text (every single-byte Windows codepage
+// agrees with ASCII for 0..127), so this is applied unconditionally whenever the heuristic matches
+// rather than special-casing which hook or which script needs it.
+std::wstring FixupMisencodedAnsiText(HDC hdc, const std::wstring& text) {
     if (text.empty()) { return text; }
     for (wchar_t c : text) {
         if (c > 0xFF) { return text; } // has real non-Latin-1 code points -> already correct Unicode
@@ -62,7 +68,7 @@ std::wstring FixupMisencodedAnsiText(const std::wstring& text) {
     for (size_t i = 0; i < text.size(); ++i) {
         bytes[i] = static_cast<char>(text[i] & 0xFF);
     }
-    UINT cp = HebrewCodePage();
+    UINT cp = CodePageForHdc(hdc);
     int wlen = MultiByteToWideChar(cp, 0, bytes.data(), static_cast<int>(bytes.size()), nullptr, 0);
     if (wlen <= 0) { return text; }
     std::wstring fixed(static_cast<size_t>(wlen), L'\0');
@@ -72,28 +78,64 @@ std::wstring FixupMisencodedAnsiText(const std::wstring& text) {
 
 // ETO_GLYPHINDEX (0x0010, wingdi.h): when set on an ExtTextOut* call, `text` isn't characters at
 // all — it's raw glyph indices into the currently-selected font, an optimization apps use to skip
-// character-to-glyph mapping (common for precomputed/shaped complex-script runs, which Hebrew is).
-// If that's what's happening here, no codepage reinterpretation of the "text" will ever produce
-// real characters, because it was never character data to begin with — decisive to know before
-// chasing codepages any further.
+// character-to-glyph mapping (common for precomputed/shaped complex-script runs — Hebrew, Arabic,
+// or any script an app chose to pre-shape). If that's what's happening, no codepage
+// reinterpretation of the "text" will ever produce real characters, because it was never character
+// data to begin with.
 constexpr UINT kEtoGlyphIndex = 0x0010;
 
-// Confirmed (real-device diag): ETO_GLYPHINDEX IS set for these calls, so `text` really is glyph
-// indices. There's no built-in "glyph index -> character" API — GetGlyphIndicesW only goes the
-// other way (character -> glyph, for the currently-selected font) — so the map has to be built by
-// brute force: run every plausible character this app could be drawing (ASCII + Hebrew block +
-// Hebrew punctuation + niqud) through GetGlyphIndicesW against the same HDC/font the real call
-// used, and invert the result. Cached per HFONT so this only runs once per distinct font actually
-// seen, not on every captured string.
-std::vector<wchar_t> BuildCandidateChars() {
+// ETO_RTLREADING (0x0080, wingdi.h): GDI's own signal that this run should be laid out right-to-
+// left. Confirmed (real-device diag) that RTL glyph runs come out in *visual* order (left-to-right
+// on screen), not *logical* (reading) order — a straightforward per-glyph decode of an RTL Hebrew
+// caption came back mirrored (e.g. "האיצי" for what's actually "יציאה"/Exit) until reversed. Using
+// this flag instead of unconditionally reversing (or hardcoding "this app is Hebrew, always
+// reverse") makes the fix general: an LTR run some other app draws via ETO_GLYPHINDEX is left
+// alone. A genuinely mixed-direction single line would need real BiDi-run handling instead of a
+// flat reversal, but that's a rarer case than getting single-direction scripts right generally.
+constexpr UINT kEtoRtlReading = 0x0080;
+
+// There's no built-in "glyph index -> character" API — GetGlyphIndicesW only goes the other way
+// (character -> glyph, for the currently-selected font) — so the reverse map has to be built by
+// brute force: run a candidate set of characters through GetGlyphIndicesW against the same
+// HDC/font the real call used, and invert the result. Cached per HFONT so this only runs once per
+// distinct font actually seen, not on every captured string.
+//
+// Tier 4 generalization: the candidate set now comes from GetFontUnicodeRanges — the font's own
+// declared coverage — instead of a hardcoded Hebrew block, so this works for whatever script a
+// future target app actually uses (Arabic, Cyrillic, Thai, a CJK subset within the cap below...)
+// without new code. Capped so a CJK-scale font (tens of thousands of glyphs) can't turn the first
+// paint of a new font into a multi-second stall; a partial candidate set still decodes whatever
+// falls inside the cap; nothing beyond it. Falls back to a small ASCII+Latin-1 set if the font
+// reports no ranges at all (e.g. a raster font that doesn't support the call) — best effort, never
+// an empty/failed decode where a fallback is possible.
+constexpr UINT kMaxGlyphCandidates = 6000;
+
+std::vector<wchar_t> FallbackCandidateChars() {
     std::vector<wchar_t> chars;
-    for (wchar_t c = 0x0020; c <= 0x007E; ++c) { chars.push_back(c); }   // ASCII printable
-    for (wchar_t c = 0x05B0; c <= 0x05C7; ++c) { chars.push_back(c); }   // Hebrew niqud/points
-    for (wchar_t c = 0x05D0; c <= 0x05EA; ++c) { chars.push_back(c); }   // Hebrew letters (Alef-Tav)
-    chars.push_back(0x05F3); chars.push_back(0x05F4);                    // Hebrew geresh/gershayim
-    chars.push_back(0x2018); chars.push_back(0x2019);                    // curly quotes (common in Hebrew UI)
-    chars.push_back(0x201C); chars.push_back(0x201D);
+    for (wchar_t c = 0x0020; c <= 0x00FF; ++c) { chars.push_back(c); } // ASCII + Latin-1 supplement
     return chars;
+}
+
+std::vector<wchar_t> BuildCandidateCharsForHdc(HDC hdc) {
+    DWORD size = GetFontUnicodeRanges(hdc, nullptr);
+    if (size == 0) { return FallbackCandidateChars(); }
+
+    std::vector<BYTE> buffer(size);
+    auto* glyphSet = reinterpret_cast<GLYPHSET*>(buffer.data());
+    if (GetFontUnicodeRanges(hdc, glyphSet) == 0 || glyphSet->cRanges == 0) {
+        return FallbackCandidateChars();
+    }
+
+    std::vector<wchar_t> chars;
+    chars.reserve(std::min<UINT>(glyphSet->cGlyphsSupported, kMaxGlyphCandidates));
+    for (DWORD r = 0; r < glyphSet->cRanges && chars.size() < kMaxGlyphCandidates; ++r) {
+        WCHAR low = glyphSet->ranges[r].wcLow;
+        USHORT count = glyphSet->ranges[r].cGlyphs;
+        for (USHORT j = 0; j < count && chars.size() < kMaxGlyphCandidates; ++j) {
+            chars.push_back(static_cast<wchar_t>(low + j));
+        }
+    }
+    return chars.empty() ? FallbackCandidateChars() : chars;
 }
 
 std::mutex g_glyphMapMutex;
@@ -109,9 +151,8 @@ const std::unordered_map<WORD, wchar_t>* GetOrBuildGlyphMap(HDC hdc) {
         if (it != g_glyphMaps.end()) { return &it->second; }
     }
 
-    static const std::vector<wchar_t> candidates = BuildCandidateChars();
     std::unordered_map<WORD, wchar_t> map;
-    for (wchar_t ch : candidates) {
+    for (wchar_t ch : BuildCandidateCharsForHdc(hdc)) {
         WORD glyph = 0xFFFF;
         DWORD result = GetGlyphIndicesW(hdc, &ch, 1, &glyph, GGI_MARK_NONEXISTING_GLYPHS);
         if (result != GDI_ERROR && glyph != 0xFFFF) {
@@ -128,7 +169,7 @@ const std::unordered_map<WORD, wchar_t>* GetOrBuildGlyphMap(HDC hdc) {
 // selected in `hdc` at call time. A glyph with no match in the candidate set becomes '?' rather
 // than silently dropped, so a partial/wrong-candidate-set decode is still visibly a decode, not
 // mistaken for a clean one.
-std::wstring DecodeGlyphIndices(HDC hdc, const wchar_t* glyphData, size_t count) {
+std::wstring DecodeGlyphIndices(HDC hdc, const wchar_t* glyphData, size_t count, UINT options) {
     const auto* map = GetOrBuildGlyphMap(hdc);
     if (!map) { return L""; }
     std::wstring result;
@@ -138,13 +179,9 @@ std::wstring DecodeGlyphIndices(HDC hdc, const wchar_t* glyphData, size_t count)
         auto it = map->find(glyph);
         result.push_back(it != map->end() ? it->second : L'?');
     }
-    // Confirmed via real-device diag: the glyph run comes out in *visual* order (left-to-right on
-    // screen), not *logical* (reading) order — a straightforward per-glyph decode of an RTL Hebrew
-    // caption came back mirrored (e.g. "האיצי" for what's actually "יציאה"/Exit). Every captured
-    // caption in this app is pure Hebrew (no embedded LTR runs like numbers observed so far), so a
-    // flat reversal is correct here; a mixed-direction line would need real BiDi-run handling
-    // instead of this, but that's not what this app's controls are producing.
-    std::reverse(result.begin(), result.end());
+    if (options & kEtoRtlReading) {
+        std::reverse(result.begin(), result.end());
+    }
     return result;
 }
 
@@ -184,7 +221,7 @@ void RecordPaintedTextA(const wchar_t* fnName, HDC hdc, LPCSTR text, int count, 
         LogHookFire(fnName, hdc, options, hexBuf);
         return;
     }
-    UINT cp = HebrewCodePage(); // the *A hooks' text is this app's own ANSI (Hebrew) data, not necessarily CP_ACP — see HebrewCodePage's comment
+    UINT cp = CodePageForHdc(hdc); // the *A hooks' text is this app's own ANSI data in whatever codepage its font implies, not necessarily CP_ACP — see CodePageForHdc's comment
     int wlen = MultiByteToWideChar(cp, 0, text, len, nullptr, 0);
     if (wlen <= 0) { LogHookFire(fnName, hdc, options, L"<empty>"); return; }
     std::wstring wide(static_cast<size_t>(wlen), L'\0');
@@ -198,7 +235,7 @@ void RecordPaintedTextW(const wchar_t* fnName, HDC hdc, LPCWSTR text, int count,
     size_t len = count >= 0 ? static_cast<size_t>(count) : wcsnlen_s(text, 8192);
     if (len == 0) { LogHookFire(fnName, hdc, options, L"<empty>"); return; }
     if (options & kEtoGlyphIndex) {
-        std::wstring decoded = DecodeGlyphIndices(hdc, text, len);
+        std::wstring decoded = DecodeGlyphIndices(hdc, text, len, options);
         wchar_t hexBuf[512] = {};
         size_t pos = 0;
         for (size_t i = 0; i < len && pos + 6 < ARRAYSIZE(hexBuf); ++i) {
@@ -212,7 +249,7 @@ void RecordPaintedTextW(const wchar_t* fnName, HDC hdc, LPCWSTR text, int count,
         }
         return;
     }
-    std::wstring wide = FixupMisencodedAnsiText(std::wstring(text, len));
+    std::wstring wide = FixupMisencodedAnsiText(hdc, std::wstring(text, len));
     LogHookFire(fnName, hdc, options, wide);
     RecordPaintedText(hdc, wide);
 }
@@ -319,7 +356,10 @@ int WINAPI Hook_GdipDrawString(void* graphics, LPCWSTR string, int length, const
     }
     if (string) {
         size_t len = length >= 0 ? static_cast<size_t>(length) : wcsnlen_s(string, 8192);
-        std::wstring text = FixupMisencodedAnsiText(std::wstring(string, len));
+        // No HDC available here — GDI+'s Graphics object wraps its own internal DC, not exposed
+        // through GdipDrawString's own parameters — so CodePageForHdc(nullptr) falls back to
+        // CP_ACP for this path specifically; best effort, same as every other fallback in here.
+        std::wstring text = FixupMisencodedAnsiText(nullptr, std::wstring(string, len));
         if (g_logCount.fetch_add(1) < kMaxLoggedCalls) {
             DiagLog(L"GdiTextCapture: GdipDrawString graphics=0x%p -> hwnd=0x%p text=\"%s\"", graphics, hwnd, text.c_str());
         }

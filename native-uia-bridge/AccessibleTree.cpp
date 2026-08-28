@@ -1,6 +1,7 @@
 #include "AccessibleTree.h"
 #include "Diagnostics.h"
 #include "GdiTextCapture.h"
+#include "OleControlTree.h"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -294,10 +295,32 @@ AccessibleNodeInfo GetNodeInfo(const AccessibleRef& ref) {
         SysFreeString(keyboardShortcut);
     }
 
-    // Last-resort fallback (see NEXT_STEPS.md, path 1): MSAA/window-text gave nothing for this
-    // node's name/value (the common case for the F3 Server 60000000 children, whose accessibility
-    // plumbing is confirmed broken at the host-app level) — fall back to whatever GDI text was
-    // actually painted into this hwnd's DC, captured via GdiTextCapture's IAT hook on FM20.DLL.
+    // Tier 2 (see NEXT_STEPS.md's extraction-tier table): MSAA/window-text (tiers 0-1) gave
+    // nothing for this node — try the OLE embedding model / native-object-model next, before
+    // falling all the way to GDI paint capture. Genuinely optional per app (this was a dead end
+    // for the one target app that originally motivated this codebase, but that's one app's
+    // accessibility plumbing being broken, not evidence the whole approach is dead) — every read
+    // is individually best-effort (OleControlTree.cpp SEH-guards the actual COM calls), so a
+    // target with no OLE support at all just falls through to tier 3/4 exactly as it did before
+    // this tier existed.
+    if (ref.hwnd && info.name.empty() && info.value.empty()) {
+        ComPtr<IDispatch> ole;
+        if (SUCCEEDED(GetRootOleDispatch(ref.hwnd, ole)) && ole) {
+            OleControlInfo oi = GetOleControlInfo(ole.Get());
+            if (!oi.name.empty()) { info.name = oi.name; }
+            if (info.value.empty() && !oi.text.empty()) { info.value = oi.text; }
+            if (info.helpText.empty() && !oi.helpText.empty()) { info.helpText = oi.helpText; }
+            if (info.accessKey.empty() && !oi.accessKey.empty()) { info.accessKey = oi.accessKey; }
+            if (!oi.name.empty() || !oi.text.empty()) {
+                DiagLog(L"GetNodeInfo(0x%p): tier 2 (OLE native-object-model) supplied name=\"%s\" value=\"%s\"",
+                    ref.hwnd, info.name.c_str(), info.value.c_str());
+            }
+        }
+    }
+
+    // Tier 3/4 (see NEXT_STEPS.md): still nothing for this node's name/value — fall back to
+    // whatever GDI text was actually painted into this hwnd's DC, captured via GdiTextCapture's
+    // IAT hook across every loaded module.
     // GetLastPaintedText only has something to report once a paint has actually happened through
     // a hooked call since the hook was installed — these controls draw themselves once at
     // window-open and don't repaint on their own, so the capture map would otherwise stay empty
