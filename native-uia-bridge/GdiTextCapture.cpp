@@ -24,11 +24,11 @@ std::unordered_map<HWND, std::wstring> g_paintedText;
 // GdipDeleteGraphics to stop tracking it once freed.
 std::unordered_map<void*, HWND> g_graphicsToHwnd;
 
-// Every hooked call gets logged, unconditionally, whether or not it yields anything usable — this
-// is the decisive answer to "are the hooks even firing, and does WindowFromDC resolve" instead of
-// continuing to guess from an empty result. Capped so a long-running attach (hooks stay installed
-// for the process's whole lifetime, not just the diagnostic dump at attach time) can't run the log
-// file away — plenty to diagnose one attach's worth of repaint activity.
+// Only a successful capture gets logged (see RecordPaintedTextForHwnd) — not every raw hook
+// firing, which used to include every empty/null draw and intermediate glyph-index attempt and
+// drowned the log once popups started auto-subclassing themselves (see WindowSubclass.cpp).
+// Capped so a long-running attach (hooks stay installed for the process's whole lifetime, not
+// just the diagnostic dump at attach time) still can't run the log file away.
 std::atomic<int> g_logCount{0};
 constexpr int kMaxLoggedCalls = 200;
 
@@ -185,17 +185,22 @@ std::wstring DecodeGlyphIndices(HDC hdc, const wchar_t* glyphData, size_t count,
     return result;
 }
 
-void LogHookFire(const wchar_t* fn, HDC hdc, UINT options, const std::wstring& text) {
-    if (g_logCount.fetch_add(1) >= kMaxLoggedCalls) { return; }
-    HWND hwnd = WindowFromDC(hdc);
-    DiagLog(L"GdiTextCapture: %s hdc=0x%p options=0x%X%s -> WindowFromDC=0x%p text=\"%s\"",
-        fn, hdc, options, (options & kEtoGlyphIndex) ? L" (ETO_GLYPHINDEX!)" : L"", hwnd, text.c_str());
-}
-
+// Logs only the winning outcome — a captured, non-empty string actually stored for a real hwnd —
+// not every raw hook firing along the way (empty/null draws, intermediate glyph-index hex before
+// decode, etc). That per-attempt logging was fine for a single manual attach, but once popups
+// auto-subclass themselves (see WindowSubclass.cpp) every hooked GDI call in every popup repeats
+// it, drowning the log for no signal: what matters is what got captured, not the attempts that
+// didn't. Capped for the same reason it always was — a long-running attach shouldn't be able to
+// grow the log file unboundedly.
 void RecordPaintedTextForHwnd(HWND hwnd, const std::wstring& text) {
     if (!hwnd || text.empty()) { return; }
-    std::lock_guard<std::mutex> lock(g_mutex);
-    g_paintedText[hwnd] = text;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_paintedText[hwnd] = text;
+    }
+    if (g_logCount.fetch_add(1) < kMaxLoggedCalls) {
+        DiagLog(L"GdiTextCapture: captured hwnd=0x%p text=\"%s\"", hwnd, text.c_str());
+    }
 }
 
 void RecordPaintedText(HDC hdc, const std::wstring& text) {
@@ -206,52 +211,31 @@ void RecordPaintedText(HDC hdc, const std::wstring& text) {
     RecordPaintedTextForHwnd(WindowFromDC(hdc), text);
 }
 
-void RecordPaintedTextA(const wchar_t* fnName, HDC hdc, LPCSTR text, int count, UINT options = 0) {
-    if (!text) { LogHookFire(fnName, hdc, options, L"<null>"); return; }
+void RecordPaintedTextA(const wchar_t* /*fnName*/, HDC hdc, LPCSTR text, int count, UINT options = 0) {
+    if (!text) { return; }
     int len = count >= 0 ? count : static_cast<int>(strnlen_s(text, 8192));
-    if (len <= 0) { LogHookFire(fnName, hdc, options, L"<empty>"); return; }
-    if (options & kEtoGlyphIndex) {
-        // Not real character data — logging it as hex is more honest than pretending a codepage
-        // conversion means anything here.
-        wchar_t hexBuf[512] = {};
-        size_t pos = 0;
-        for (int i = 0; i < len && pos + 3 < ARRAYSIZE(hexBuf); ++i) {
-            pos += swprintf_s(hexBuf + pos, ARRAYSIZE(hexBuf) - pos, L"%02X ", static_cast<unsigned char>(text[i]));
-        }
-        LogHookFire(fnName, hdc, options, hexBuf);
-        return;
-    }
+    if (len <= 0) { return; }
+    if (options & kEtoGlyphIndex) { return; } // no *A-side glyph-index decode path — this app's real glyph runs all came through *W anyway
     UINT cp = CodePageForHdc(hdc); // the *A hooks' text is this app's own ANSI data in whatever codepage its font implies, not necessarily CP_ACP — see CodePageForHdc's comment
     int wlen = MultiByteToWideChar(cp, 0, text, len, nullptr, 0);
-    if (wlen <= 0) { LogHookFire(fnName, hdc, options, L"<empty>"); return; }
+    if (wlen <= 0) { return; }
     std::wstring wide(static_cast<size_t>(wlen), L'\0');
     MultiByteToWideChar(cp, 0, text, len, wide.data(), wlen);
-    LogHookFire(fnName, hdc, options, wide);
     RecordPaintedText(hdc, wide);
 }
 
-void RecordPaintedTextW(const wchar_t* fnName, HDC hdc, LPCWSTR text, int count, UINT options = 0) {
-    if (!text) { LogHookFire(fnName, hdc, options, L"<null>"); return; }
+void RecordPaintedTextW(const wchar_t* /*fnName*/, HDC hdc, LPCWSTR text, int count, UINT options = 0) {
+    if (!text) { return; }
     size_t len = count >= 0 ? static_cast<size_t>(count) : wcsnlen_s(text, 8192);
-    if (len == 0) { LogHookFire(fnName, hdc, options, L"<empty>"); return; }
+    if (len == 0) { return; }
     if (options & kEtoGlyphIndex) {
         std::wstring decoded = DecodeGlyphIndices(hdc, text, len, options);
-        wchar_t hexBuf[512] = {};
-        size_t pos = 0;
-        for (size_t i = 0; i < len && pos + 6 < ARRAYSIZE(hexBuf); ++i) {
-            pos += swprintf_s(hexBuf + pos, ARRAYSIZE(hexBuf) - pos, L"%04X ", static_cast<unsigned short>(text[i]));
-        }
         if (!decoded.empty()) {
-            LogHookFire(fnName, hdc, options, decoded + L"  [glyphs: " + hexBuf + L"]");
             RecordPaintedText(hdc, decoded);
-        } else {
-            LogHookFire(fnName, hdc, options, hexBuf);
         }
         return;
     }
-    std::wstring wide = FixupMisencodedAnsiText(hdc, std::wstring(text, len));
-    LogHookFire(fnName, hdc, options, wide);
-    RecordPaintedText(hdc, wide);
+    RecordPaintedText(hdc, FixupMisencodedAnsiText(hdc, std::wstring(text, len)));
 }
 
 // ---- Original function pointers, filled in by InstallGdiTextHooks ----
@@ -359,11 +343,7 @@ int WINAPI Hook_GdipDrawString(void* graphics, LPCWSTR string, int length, const
         // No HDC available here — GDI+'s Graphics object wraps its own internal DC, not exposed
         // through GdipDrawString's own parameters — so CodePageForHdc(nullptr) falls back to
         // CP_ACP for this path specifically; best effort, same as every other fallback in here.
-        std::wstring text = FixupMisencodedAnsiText(nullptr, std::wstring(string, len));
-        if (g_logCount.fetch_add(1) < kMaxLoggedCalls) {
-            DiagLog(L"GdiTextCapture: GdipDrawString graphics=0x%p -> hwnd=0x%p text=\"%s\"", graphics, hwnd, text.c_str());
-        }
-        RecordPaintedTextForHwnd(hwnd, text);
+        RecordPaintedTextForHwnd(hwnd, FixupMisencodedAnsiText(nullptr, std::wstring(string, len)));
     }
     return g_origGdipDrawString(graphics, string, length, font, layoutRect, stringFormat, brush);
 }

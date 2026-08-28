@@ -110,19 +110,19 @@ HRESULT GetContainerAccessible(HWND hwnd, ComPtr<IAccessible>& outAcc) {
     // SendMessageW correctly dispatches to hwnd's owning thread and, since this always runs
     // before our subclass is installed, reaches the container's real original WM_GETOBJECT
     // handler — see the header comment for why this must not be CallWindowProc.
+    //
+    // Deliberately quiet about which of the two paths below actually answered — logging every
+    // attempt (not just the winning one) was fine for a single manual attach, but once popups
+    // auto-subclass themselves (see WindowSubclass.cpp), the same 3-4 lines repeat per popup and
+    // per child inside it, drowning the log. One line at the end, only for the outcome that
+    // matters (what GetChildren()/GetNodeInfo actually end up using), is enough to diagnose from.
     LRESULT lresult = SendMessageW(hwnd, WM_GETOBJECT, 0, OBJID_CLIENT);
-    DiagLog(L"GetContainerAccessible(0x%p): SendMessageW(WM_GETOBJECT, OBJID_CLIENT) -> lresult=%lld", hwnd, static_cast<long long>(lresult));
     if (lresult != 0) {
         IAccessible* raw = nullptr;
-        HRESULT unmarshalHr = ObjectFromLresult(lresult, IID_IAccessible, 0, reinterpret_cast<void**>(&raw));
-        if (SUCCEEDED(unmarshalHr)) {
-            DiagLog(L"GetContainerAccessible(0x%p): primary path (target answered WM_GETOBJECT itself) succeeded", hwnd);
+        if (SUCCEEDED(ObjectFromLresult(lresult, IID_IAccessible, 0, reinterpret_cast<void**>(&raw)))) {
             outAcc.Attach(raw);
             return S_OK;
         }
-        DiagLog(L"GetContainerAccessible(0x%p): ObjectFromLresult failed (hr=0x%08lX), trying fallback", hwnd, static_cast<unsigned long>(unmarshalHr));
-    } else {
-        DiagLog(L"GetContainerAccessible(0x%p): target did not answer WM_GETOBJECT itself (lresult=0) — no app-provided IAccessible, trying fallback", hwnd);
     }
 
     // Fallback: plenty of legacy Win32 controls (confirmed via Inspect in MSAA mode against this
@@ -139,10 +139,9 @@ HRESULT GetContainerAccessible(HWND hwnd, ComPtr<IAccessible>& outAcc) {
     IAccessible* raw = nullptr;
     HRESULT hr = AccessibleObjectFromWindow(hwnd, OBJID_CLIENT, IID_IAccessible, reinterpret_cast<void**>(&raw));
     if (FAILED(hr) || !raw) {
-        DiagLog(L"GetContainerAccessible(0x%p): fallback AccessibleObjectFromWindow also failed (hr=0x%08lX) — target has no usable IAccessible via any path", hwnd, static_cast<unsigned long>(hr));
+        DiagLog(L"GetContainerAccessible(0x%p): no usable IAccessible via any path (hr=0x%08lX)", hwnd, static_cast<unsigned long>(hr));
         return FAILED(hr) ? hr : E_FAIL;
     }
-    DiagLog(L"GetContainerAccessible(0x%p): fallback path (AccessibleObjectFromWindow's generic proxy synthesis) succeeded", hwnd);
     outAcc.Attach(raw);
     return S_OK;
 }
@@ -329,12 +328,15 @@ AccessibleNodeInfo GetNodeInfo(const AccessibleRef& ref) {
     // blocking semantics WM_GETOBJECT already relies on elsewhere in this codebase) — synchronous,
     // so the hooked GDI calls have already run by the time UpdateWindow returns.
     if (ref.hwnd && info.name.empty() && info.value.empty()) {
-        BOOL invalidated = InvalidateRect(ref.hwnd, nullptr, TRUE);
-        BOOL updated = UpdateWindow(ref.hwnd);
+        InvalidateRect(ref.hwnd, nullptr, TRUE);
+        UpdateWindow(ref.hwnd);
         std::wstring painted = GetLastPaintedText(ref.hwnd);
-        DiagLog(L"GetNodeInfo(0x%p): forced repaint (InvalidateRect=%d, UpdateWindow=%d) before GDI-capture fallback -> painted=\"%s\"",
-            ref.hwnd, invalidated, updated, painted.c_str());
+        // Quiet on failure — an empty result here is the common case for every node that isn't a
+        // GDI-painted control, not something worth a log line each time (same reasoning as
+        // GetContainerAccessible above). LogDiscoveredChildren already prints the final
+        // name/value per child either way, which is the one line that actually matters.
         if (!painted.empty()) {
+            DiagLog(L"GetNodeInfo(0x%p): tier 3/4 (GDI paint capture) supplied \"%s\"", ref.hwnd, painted.c_str());
             // These captured strings are almost always button/label captions (that's what's
             // actually painted for the F3 Server children) — UIA convention is that a caption is
             // the control's Name, not its Value (Value pattern is for editable text, and real
