@@ -157,6 +157,19 @@ DWORD WINAPI AttachWorker(LPVOID) {
 
 } // namespace
 
+// Exported so a subsequent `windows: attachUiaBridge` call — this DLL already loaded in the
+// target process from a prior attach — can re-run attach logic without relying on
+// DLL_PROCESS_ATTACH, which Windows fires only once per process ever; a second LoadLibraryW just
+// bumps the refcount and does nothing further. Injector.cpp detects the already-loaded case (via
+// a module snapshot) and calls this directly instead: computes this function's RVA against a
+// *locally* (DONT_RESOLVE_DLL_REFERENCES) loaded copy of the same DLL file, then CreateRemoteThread
+// at (that RVA + the target process's real, already-loaded module base) — a brand-new thread each
+// time, so CoInitializeEx/the handshake-file protocol/etc. all apply exactly as they do on first
+// attach. See Injector.cpp's CallReattachEntryPoint.
+extern "C" __declspec(dllexport) DWORD WINAPI ReattachEntryPoint(LPVOID param) {
+    return AttachWorker(param);
+}
+
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     switch (reason) {
         case DLL_PROCESS_ATTACH:

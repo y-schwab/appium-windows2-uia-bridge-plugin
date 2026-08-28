@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <tlhelp32.h>
 
 namespace {
 
@@ -183,6 +184,73 @@ bool InjectDll(DWORD pid, const std::wstring& dllPath) {
     return ok;
 }
 
+// Finds `dllPath` already loaded in `pid`, returning its real base address there (the correct
+// HMODULE for THAT process — modBaseAddr from a Toolhelp32 snapshot, not something we could
+// compute locally) or null if it isn't loaded yet. Path compared case-insensitively; Toolhelp32
+// reports each module's full disk path in szExePath, which matches what we pass to LoadLibraryW.
+BYTE* FindAlreadyLoadedModule(DWORD pid, const std::wstring& dllPath) {
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        return nullptr;
+    }
+    MODULEENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    BYTE* found = nullptr;
+    if (Module32FirstW(snapshot, &entry)) {
+        do {
+            if (_wcsicmp(entry.szExePath, dllPath.c_str()) == 0) {
+                found = entry.modBaseAddr;
+                break;
+            }
+        } while (Module32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return found;
+}
+
+// Re-attaches into a process that already has our DLL loaded (see DllMain.cpp's
+// ReattachEntryPoint for why this exists — DLL_PROCESS_ATTACH only fires once per process, so a
+// second LoadLibraryW alone would do nothing). Computes ReattachEntryPoint's RVA against a
+// *locally* loaded copy of the same DLL file (DONT_RESOLVE_DLL_REFERENCES: maps and relocates the
+// PE image normally — so GetProcAddress resolves the export table correctly — without running its
+// DllMain or resolving its own imports, neither of which we need since we're only computing an
+// address, never calling anything in this local copy), then starts a remote thread at
+// `remoteModuleBase + rva` — RVA is base-independent by construction (that's what makes this
+// technique valid across two different processes' independent ASLR bases for the same DLL image).
+bool CallReattachEntryPoint(DWORD pid, const std::wstring& dllPath, BYTE* remoteModuleBase) {
+    HMODULE localModule = LoadLibraryExW(dllPath.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
+    if (!localModule) {
+        fwprintf(stderr, L"LoadLibraryExW (local, DONT_RESOLVE_DLL_REFERENCES) failed (error %lu)\n", GetLastError());
+        return false;
+    }
+    FARPROC localFn = GetProcAddress(localModule, "ReattachEntryPoint");
+    if (!localFn) {
+        fwprintf(stderr, L"GetProcAddress(ReattachEntryPoint) failed on the local copy (error %lu) — was the DLL rebuilt without exporting it?\n", GetLastError());
+        FreeLibrary(localModule);
+        return false;
+    }
+    ptrdiff_t rva = reinterpret_cast<BYTE*>(localFn) - reinterpret_cast<BYTE*>(localModule);
+    FreeLibrary(localModule);
+
+    HANDLE process = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (!process) {
+        fwprintf(stderr, L"OpenProcess failed for pid %lu (error %lu)\n", pid, GetLastError());
+        return false;
+    }
+
+    auto remoteFn = reinterpret_cast<LPTHREAD_START_ROUTINE>(remoteModuleBase + rva);
+    HANDLE thread = CreateRemoteThread(process, nullptr, 0, remoteFn, nullptr, 0, nullptr);
+    if (!thread) {
+        fwprintf(stderr, L"CreateRemoteThread(ReattachEntryPoint) failed (error %lu)\n", GetLastError());
+        CloseHandle(process);
+        return false;
+    }
+    WaitForSingleObject(thread, 15000);
+    CloseHandle(thread);
+    CloseHandle(process);
+    return true; // AttachWorker's own outcome is reported via the handshake/result-file protocol, same as first-time injection — WaitForAttachResult (the caller) is what actually confirms success
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t* argv[]) {
@@ -208,7 +276,16 @@ int wmain(int argc, wchar_t* argv[]) {
         return 1;
     }
 
-    if (!InjectDll(pid, argv[2])) {
+    // Already loaded (a prior attach into this same process) -> re-enter via the exported
+    // ReattachEntryPoint instead of LoadLibraryW, which would silently do nothing on a second
+    // call (DLL_PROCESS_ATTACH only fires once per process — see DllMain.cpp). Otherwise, this is
+    // genuinely the first attach into this process: the normal LoadLibraryW-based injection path.
+    std::wstring dllPath = argv[2];
+    BYTE* existingModule = FindAlreadyLoadedModule(pid, dllPath);
+    bool injected = existingModule
+        ? CallReattachEntryPoint(pid, dllPath, existingModule)
+        : InjectDll(pid, dllPath);
+    if (!injected) {
         return 1;
     }
 
