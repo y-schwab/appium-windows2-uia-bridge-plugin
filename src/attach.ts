@@ -96,6 +96,30 @@ try {
  * the container's children are part of the real UIA tree: the driver's ordinary
  * `findElement`/`click`/`getText`/etc. reach them with no further plugin involvement.
  */
+/**
+ * Boils the native side's full attach trace (every extraction tier attempted per node, every GDI
+ * hook installed per module — genuinely useful for debugging, genuinely too much for every normal
+ * attach, especially against a dense UI tree with dozens of controls) down to the few lines that
+ * actually matter for the common case: did it succeed, what window, how many elements. Parsed by
+ * matching the trace's own known summary lines (DllMain.cpp's DiagLog calls) rather than having
+ * the native side emit two separate outputs — one text stream stays the single source of truth,
+ * this just picks out which lines are worth `log.info`-level attention.
+ */
+function summarizeDiag(diag: string, hwnd: number): string {
+    const lines = diag.split(/\r?\n/);
+    const installLine = lines.find((l) => l.includes('InstallSubclass ->'));
+    const targetLine = lines.find((l) => l.includes('Target hwnd details:'));
+    const childLine = lines.find((l) => l.includes('Child discovery for root:'));
+
+    const outcome = installLine?.includes('success') ? 'succeeded' : 'FAILED';
+    const windowText = targetLine?.match(/windowText="([^"]*)"/)?.[1] ?? '';
+    const childCount = childLine?.match(/returned (\d+) total/)?.[1] ?? '?';
+
+    return `windows: attachUiaBridge ${outcome} for hwnd ${hwnd}` +
+        `${windowText ? ` ("${windowText}")` : ''} — ${childCount} child element(s) discovered ` +
+        `(run Appium with debug logging for the full per-element trace)`;
+}
+
 export async function attachUiaBridge(hwnd: number): Promise<void> {
     const bitness = await resolveTargetBitness(hwnd);
     const dir = nativeDir(bitness);
@@ -119,8 +143,16 @@ export async function attachUiaBridge(hwnd: number): Promise<void> {
             // On success there's no other channel back to the caller for this — without logging
             // it here, a successful attach into an app with an empty/unexpected tree would leave
             // no trace of *why*. Goes to the driver's own log stream, not the resolved value.
-            if (stderr.trim()) {
-                log.info(`attach diagnostics for hwnd ${hwnd}:\n${stderr.trim()}`);
+            //
+            // Two levels: a one-line summary always visible at info (this is the "very simple
+            // version logged all the time" — dense trees with dozens/hundreds of elements were
+            // drowning normal attach logging otherwise), and the full per-element trace at debug
+            // — Appium's own logger already suppresses debug-level output unless the server/session
+            // is actually running with debug logging on, so this needs no verbosity flag of our own.
+            const diag = stderr.trim();
+            if (diag) {
+                log.info(summarizeDiag(diag, hwnd));
+                log.debug(`attach diagnostics for hwnd ${hwnd}:\n${diag}`);
             }
             resolve();
         });
