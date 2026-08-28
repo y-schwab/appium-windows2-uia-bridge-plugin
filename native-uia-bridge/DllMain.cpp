@@ -11,7 +11,6 @@
 
 #include "Diagnostics.h"
 #include "GdiTextCapture.h"
-#include "PopupWatcher.h"
 #include "WindowSubclass.h"
 
 namespace {
@@ -145,12 +144,6 @@ DWORD WINAPI AttachWorker(LPVOID) {
     UiaBridge::DiagLog(L"InstallSubclass -> %s%s%s", ok ? L"success" : L"FAILED", ok ? L"" : L": ", ok ? L"" : error.c_str());
     WriteResultFile(ok, error);
 
-    // Watch for new top-level windows (dialogs, message boxes, popups) the app opens after this
-    // point, and auto-attach to each — see PopupWatcher.h. Installed unconditionally, independent
-    // of whether the explicitly-requested hwnd above succeeded, so a later popup still gets
-    // covered even if this specific attach call failed for its own reasons.
-    UiaBridge::InstallPopupWatcher();
-
     if (comInitialized) { CoUninitialize(); }
     return 0;
 }
@@ -179,7 +172,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
             CloseHandle(CreateThread(nullptr, 0, AttachWorker, nullptr, 0, nullptr));
             break;
         case DLL_PROCESS_DETACH:
-            UiaBridge::RemovePopupWatcher();
             UiaBridge::RemoveAllSubclasses();
             break;
     }
