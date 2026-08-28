@@ -71,6 +71,7 @@
     <ClCompile Include="ElementRegistry.cpp" />
     <ClCompile Include="GdiTextCapture.cpp" />
     <ClCompile Include="OleControlTree.cpp" />
+    <ClCompile Include="PopupWatcher.cpp" />
     <ClCompile Include="ProviderElement.cpp" />
     <ClCompile Include="ProviderRoot.cpp" />
     <ClCompile Include="WindowSubclass.cpp" />
@@ -83,6 +84,7 @@
     <ClInclude Include="ElementRegistry.h" />
     <ClInclude Include="GdiTextCapture.h" />
     <ClInclude Include="OleControlTree.h" />
+    <ClInclude Include="PopupWatcher.h" />
     <ClInclude Include="ProviderElement.h" />
     <ClInclude Include="ProviderRoot.h" />
     <ClInclude Include="UiaMapping.h" />
