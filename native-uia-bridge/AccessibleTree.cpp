@@ -156,9 +156,25 @@ namespace {
 std::vector<HWND> GetDirectChildWindows(HWND hwnd) {
     std::vector<HWND> result;
     for (HWND child = GetWindow(hwnd, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT)) {
-        if (IsWindowVisible(child)) {
-            result.push_back(child);
+        if (!IsWindowVisible(child)) { continue; }
+
+        // IsWindowVisible only checks the WS_VISIBLE style bit up the parent chain — it says
+        // nothing about actual on-screen area. A classic ComboBox-style control's own dropdown
+        // listbox child window is the textbook case: many implementations leave it WS_VISIBLE
+        // permanently and just collapse it to zero (or near-zero) size while the dropdown is
+        // closed, rather than actually hiding it — that child then passes this filter and shows
+        // up in the tree as a real, always-present control that a user can never interact with
+        // (confirmed pattern: every ComboBox on this app's forms exposed exactly one such phantom
+        // child). Excluding degenerate-size windows here is general (not specific to this app's
+        // control library) and self-corrects live: once a dropdown genuinely opens and resizes to
+        // its real on-screen extent, the next tree walk picks it up normally, since this function
+        // queries the real window state every call rather than caching anything.
+        RECT rect{};
+        if (GetWindowRect(child, &rect) && (rect.right - rect.left <= 0 || rect.bottom - rect.top <= 0)) {
+            continue; // zero/negative area — see the comment above; GetWindowRect failure falls through and keeps the window rather than guessing
         }
+
+        result.push_back(child);
     }
     return result;
 }

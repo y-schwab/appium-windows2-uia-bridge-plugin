@@ -12,6 +12,7 @@ namespace {
 
 HWINEVENTHOOK g_foregroundHook = nullptr;
 HWINEVENTHOOK g_dialogStartHook = nullptr;
+HWINEVENTHOOK g_objectShowHook = nullptr;
 
 void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG idChild, DWORD, DWORD) {
     // idObject/idChild filter out the per-element noise WinEvents also carry (e.g. a caret move or
@@ -39,7 +40,7 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
 } // namespace
 
 void InstallPopupWatcher() {
-    if (g_foregroundHook || g_dialogStartHook) { return; } // already installed
+    if (g_foregroundHook || g_dialogStartHook || g_objectShowHook) { return; } // already installed
 
     HMODULE self = nullptr;
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(&WinEventProc), &self);
@@ -47,14 +48,25 @@ void InstallPopupWatcher() {
     DWORD pid = GetCurrentProcessId();
     g_foregroundHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, self, WinEventProc, pid, 0, WINEVENT_INCONTEXT);
     g_dialogStartHook = SetWinEventHook(EVENT_SYSTEM_DIALOGSTART, EVENT_SYSTEM_DIALOGSTART, self, WinEventProc, pid, 0, WINEVENT_INCONTEXT);
+    // EVENT_SYSTEM_DIALOGSTART only fires for windows created through the real Win32
+    // DialogBox/CreateDialog APIs, and EVENT_SYSTEM_FOREGROUND only for a window that actually
+    // steals OS foreground focus — this app's custom UI framework (DlgLibrary.dll et al.) has
+    // shown a consistent pattern of routing around standard Windows APIs, so neither is reliable
+    // here. EVENT_OBJECT_SHOW fires whenever any window becomes visible via ShowWindow, regardless
+    // of which API created it or whether it takes focus — the most universal of the three, kept
+    // alongside the other two rather than replacing them since a genuine standards-compliant app
+    // still benefits from the more specific signals firing first/being cheaper to filter.
+    g_objectShowHook = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW, self, WinEventProc, pid, 0, WINEVENT_INCONTEXT);
 
-    DiagLog(L"InstallPopupWatcher: foreground hook %s, dialog-start hook %s",
-        g_foregroundHook ? L"installed" : L"FAILED", g_dialogStartHook ? L"installed" : L"FAILED");
+    DiagLog(L"InstallPopupWatcher: foreground hook %s, dialog-start hook %s, object-show hook %s",
+        g_foregroundHook ? L"installed" : L"FAILED", g_dialogStartHook ? L"installed" : L"FAILED",
+        g_objectShowHook ? L"installed" : L"FAILED");
 }
 
 void RemovePopupWatcher() {
     if (g_foregroundHook) { UnhookWinEvent(g_foregroundHook); g_foregroundHook = nullptr; }
     if (g_dialogStartHook) { UnhookWinEvent(g_dialogStartHook); g_dialogStartHook = nullptr; }
+    if (g_objectShowHook) { UnhookWinEvent(g_objectShowHook); g_objectShowHook = nullptr; }
 }
 
 } // namespace UiaBridge
