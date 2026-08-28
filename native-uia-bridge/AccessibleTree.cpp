@@ -205,13 +205,26 @@ std::vector<AccessibleRef> GetChildren(const AccessibleRef& node) {
                             // window-based walk recurse correctly from this node too, not just
                             // from directly-enumerated child windows.
                             HWND childHwnd = nullptr;
+                            bool zeroArea = false;
                             if (SUCCEEDED(WindowFromAccessibleObject(ref.acc.Get(), &childHwnd)) && childHwnd) {
                                 ref.hwnd = childHwnd;
                                 coveredHwnds.push_back(childHwnd);
+                                // Same zero-area exclusion as the window-enum path below, applied
+                                // here too — a ComboBox-style control's closed dropdown-list child
+                                // is just as likely to arrive as a full MSAA child object resolved
+                                // to its own hwnd (this branch) as via plain window enumeration,
+                                // and a zero-size element is equally useless either way: it can
+                                // never be clicked, located by point, or usefully inspected. Only
+                                // excluded here, not from `result` on the simple-child branch below
+                                // (those have no hwnd/rect of their own to check at all).
+                                RECT rect{};
+                                zeroArea = GetWindowRect(childHwnd, &rect) && (rect.right - rect.left <= 0 || rect.bottom - rect.top <= 0);
                             }
-                            result.push_back(ref);
+                            if (!zeroArea) {
+                                result.push_back(ref);
+                            }
                         }
-                        VariantClear(&children[i]);
+                        VariantClear(&children[i]); // must run regardless of zeroArea — releases AccessibleChildren's own reference on children[i].pdispVal
                     } else if (children[i].vt == VT_I4) {
                         // Simple children have no window of their own — nothing to dedupe or recurse into via hwnd.
                         ref.acc = node.acc;
